@@ -465,23 +465,8 @@ async function sourceFearGreed() {
   };
 }
 
-// CoinGecko coins endpoint sering 429 di shared IP — kita TIDAK lagi bergantung
-// padanya untuk change7d/30d/marketCap/ath (sudah dihitung dari Binance).
-// Endpoint ini sekarang OPSIONAL (best-effort), hanya untuk cross-check & ATH absolut.
-async function sourceCoinGecko() {
-  const d = await fetchJSON(
-    'https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&tickers=false&community_data=false&developer_data=false&sparkline=false',
-    7000
-  );
-  const m = d.market_data;
-  return {
-    change7d: m.price_change_percentage_7d,
-    change30d: m.price_change_percentage_30d,
-    marketCap: m.market_cap.usd,
-    ath: m.ath.usd,
-    athDistance: m.ath_change_percentage.usd,
-  };
-}
+// sourceCoinGecko dihapus (dead code — sudah keluar dari SOURCES sejak v5.3,
+// market stats dihitung dari Binance klines).
 
 // CoinGecko global — best effort untuk BTC dominance (non-kritis).
 async function sourceGlobal() {
@@ -719,15 +704,47 @@ function parseStooqCsv(text) {
   };
 }
 
+// Yahoo Finance chart API (unofficial tapi jauh lebih stabil dari Stooq di
+// shared IP Vercel). Return { close, changePct } atau null.
+async function yahooQuote(symbol) {
+  const d = await fetchJSON(
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`,
+    6000
+  );
+  const res = d?.chart?.result?.[0];
+  if (!res) return null;
+  const meta = res.meta || {};
+  const closes = (res.indicators?.quote?.[0]?.close || []).filter(v => v != null);
+  const price = meta.regularMarketPrice ?? closes[closes.length - 1] ?? null;
+  const prev  = meta.chartPreviousClose ?? closes[closes.length - 2] ?? null;
+  if (price == null) return null;
+  return {
+    close: +price,
+    changePct: prev ? ((price - prev) / prev) * 100 : null,
+  };
+}
+
+// Macro v8: Yahoo primary (no key), Stooq fallback (sering throttle).
 async function sourceMacro() {
-  const [dxyTxt, goldTxt, spxTxt] = await Promise.all([
-    fetchText('https://stooq.com/q/l/?s=dx.f&f=sd2t2ohlcv&h&e=csv', 5000).catch(() => null),
-    fetchText('https://stooq.com/q/l/?s=xauusd&f=sd2t2ohlcv&h&e=csv', 5000).catch(() => null),
-    fetchText('https://stooq.com/q/l/?s=^spx&f=sd2t2ohlcv&h&e=csv',   5000).catch(() => null),
+  let [dxy, gold, spx] = await Promise.all([
+    yahooQuote('DX-Y.NYB').catch(() => null),
+    yahooQuote('GC=F').catch(() => null),
+    yahooQuote('^GSPC').catch(() => null),
   ]);
-  const dxy  = dxyTxt  ? parseStooqCsv(dxyTxt)  : null;
-  const gold = goldTxt ? parseStooqCsv(goldTxt) : null;
-  const spx  = spxTxt  ? parseStooqCsv(spxTxt)  : null;
+  let source = 'yahoo';
+
+  if (!dxy && !gold && !spx) {
+    // Fallback: Stooq CSV
+    const [dxyTxt, goldTxt, spxTxt] = await Promise.all([
+      fetchText('https://stooq.com/q/l/?s=dx.f&f=sd2t2ohlcv&h&e=csv', 5000).catch(() => null),
+      fetchText('https://stooq.com/q/l/?s=xauusd&f=sd2t2ohlcv&h&e=csv', 5000).catch(() => null),
+      fetchText('https://stooq.com/q/l/?s=^spx&f=sd2t2ohlcv&h&e=csv',   5000).catch(() => null),
+    ]);
+    dxy  = dxyTxt  ? parseStooqCsv(dxyTxt)  : null;
+    gold = goldTxt ? parseStooqCsv(goldTxt) : null;
+    spx  = spxTxt  ? parseStooqCsv(spxTxt)  : null;
+    source = 'stooq';
+  }
   if (!dxy && !gold && !spx) return null;
 
   // Risk environment classification
@@ -746,6 +763,7 @@ async function sourceMacro() {
     gold,
     spx,
     riskRegime,
+    source,
   };
 }
 
@@ -784,50 +802,54 @@ async function sourceStablecoins() {
   return { total: totalNow, change24h, change7d, liquiditySignal, top };
 }
 
-// ── Bitcoin ETF flows (SoSoValue, free no key) ──────────────────────────────
-// SoSoValue melacak ETF BTC spot (IBIT/FBTC/ARKB/dll) — sumber data yang benar.
-// Endpoint: /api/etf/bitcoin/fund/flow/summary (tidak butuh API key)
-async function sourceEtfFlows() {
-  // Primary: SoSoValue summary endpoint
-  const d = await fetchJSON(
-    'https://sosovalue.xyz/api/etf/bitcoin/fund/flow/summary',
-    7000
-  ).catch(() => null);
+// ── Bitcoin ETF flows (SoSoValue Open API — BUTUH FREE KEY) ──────────────────
+// Endpoint lama sosovalue.xyz/api/... TIDAK PERNAH ADA (dead code v6) — diganti
+// Open API resmi. Daftar gratis di sosovalue.com → API key, kirim via header
+// 'x-soso-key' dari browser (pola BYOK seperti Coinalyze).
+async function sourceEtfFlows(apiKey) {
+  if (!apiKey) return null;
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const r = await fetch('https://openapi.sosovalue.com/openapi/v2/etf/historicalInflowChart', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'x-soso-api-key': apiKey, 'content-type': 'application/json', 'accept': 'application/json' },
+      body: JSON.stringify({ type: 'us-btc-spot' }),
+    });
+    if (!r.ok) throw new Error(`SoSoValue HTTP ${r.status}`);
+    const d = await r.json();
+    // Struktur: { code:0, data: [...] } atau { data: { list: [...] } }
+    let list = Array.isArray(d?.data) ? d.data : (d?.data?.list || d?.list || []);
+    if (!Array.isArray(list) || !list.length) return null;
+    // Normalisasi: { date, flow } — field flow bisa bernama totalNetInflow/netInflow
+    const rows = list.map(e => ({
+      date: e.date || e.dataDate || e.day || null,
+      flow: +(e.totalNetInflow ?? e.netInflow ?? e.flow ?? NaN),
+    })).filter(e => e.date && !Number.isNaN(e.flow));
+    if (!rows.length) return null;
+    rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
 
-  if (d) {
-    // Struktur SoSoValue: { date, totalNetFlow, totalAum, ... }
-    const netFlow = d.totalNetFlow ?? d.netFlow ?? d.flow ?? null;
-    const aum     = d.totalAum    ?? d.aum     ?? null;
-    if (typeof netFlow === 'number') {
-      return {
-        netFlow24h: netFlow,
-        aum: typeof aum === 'number' ? aum : null,
-        signal: netFlow > 0 ? 'INFLOW' : netFlow < 0 ? 'OUTFLOW' : 'FLAT',
-        source: 'sosovalue',
-      };
-    }
-    // Fallback: cari field numerik dari array
-    const arr = Array.isArray(d) ? d : (d.data || d.list || []);
-    if (Array.isArray(arr) && arr.length) {
-      let totalFlow = 0, totalAum = 0, count = 0;
-      for (const e of arr) {
-        const f = e.netFlow ?? e.flow ?? e.dailyFlow ?? null;
-        const a = e.aum ?? e.totalAssets ?? null;
-        if (typeof f === 'number') { totalFlow += f; count++; }
-        if (typeof a === 'number') totalAum += a;
-      }
-      if (count > 0) {
-        return {
-          netFlow24h: totalFlow,
-          aum: totalAum || null,
-          signal: totalFlow > 0 ? 'INFLOW' : totalFlow < 0 ? 'OUTFLOW' : 'FLAT',
-          source: 'sosovalue',
-        };
-      }
-    }
+    const last5 = rows.slice(-5);
+    const flowUsd = rows[rows.length - 1].flow;
+    const flow5dSum = last5.reduce((s, e) => s + e.flow, 0);
+    // Streak: berapa hari berturut-turut flow searah (dari hari terakhir mundur)
+    let streak = 0;
+    const dir = Math.sign(flowUsd);
+    for (let i = rows.length - 1; i >= 0 && Math.sign(rows[i].flow) === dir && dir !== 0; i--) streak++;
+
+    return {
+      netFlow24h: flowUsd,                 // kompat dgn smartMoneyScore & UI lama
+      flow5dSum,
+      streak,
+      streakDirection: dir > 0 ? 'INFLOW' : dir < 0 ? 'OUTFLOW' : 'FLAT',
+      lastDate: rows[rows.length - 1].date,
+      signal: flowUsd > 0 ? 'INFLOW' : flowUsd < 0 ? 'OUTFLOW' : 'FLAT',
+      source: 'sosovalue-openapi',
+    };
+  } finally {
+    clearTimeout(tid);
   }
-
-  return null;
 }
 
 // ── CVD (Cumulative Volume Delta) dari Binance FUTURES aggTrades — order flow ─
@@ -1064,8 +1086,544 @@ async function sourceCoinalyze(apiKey) {
 }
 
 // =============================================================================
+//  NEW v8: Positioning whale & institusi lintas venue (KEBUTUHAN_SINYAL §3-5)
+//  Semua TANPA KEY kecuali yang ditandai. Semua optional + timeout ≤ 8s.
+// =============================================================================
+
+// ── §3.2 Hyperliquid — perp DEX terbesar (TANPA KEY) ─────────────────────────
+// Funding per JAM → ×8 untuk dibanding funding 8h CEX. Sinyal ortogonal:
+// positioning whale DEX vs retail CEX.
+async function sourceHyperliquid() {
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 7000);
+  try {
+    const r = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+    });
+    if (!r.ok) throw new Error(`Hyperliquid HTTP ${r.status}`);
+    const d = await r.json();
+    const universe = d?.[0]?.universe;
+    const ctxs = d?.[1];
+    if (!Array.isArray(universe) || !Array.isArray(ctxs)) return null;
+    const i = universe.findIndex(u => u?.name === 'BTC');
+    if (i < 0 || !ctxs[i]) return null;
+    const c = ctxs[i];
+    const funding1h = parseFloat(c.funding) * 100;          // % per jam
+    const markPx = parseFloat(c.markPx);
+    const oiBtc = parseFloat(c.openInterest);
+    if (Number.isNaN(funding1h) || Number.isNaN(markPx)) return null;
+    return {
+      funding1hPct: +funding1h.toFixed(6),
+      funding8hPct: +(funding1h * 8).toFixed(4),            // setara funding 8h CEX
+      openInterestBtc: Number.isNaN(oiBtc) ? null : oiBtc,
+      openInterestUsd: Number.isNaN(oiBtc) ? null : Math.round(oiBtc * markPx),
+      markPx,
+      oraclePx: c.oraclePx != null ? parseFloat(c.oraclePx) : null,
+      premiumPct: c.premium != null ? +(parseFloat(c.premium) * 100).toFixed(4) : null,
+      dayVolumeUsd: c.dayNtlVlm != null ? Math.round(parseFloat(c.dayNtlVlm)) : null,
+    };
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+// ── §3.3 Bitfinex — margin long/short positions aktual (TANPA KEY) ───────────
+// Satu-satunya bursa besar yang publikasi JUMLAH posisi margin (bukan rasio
+// akun). Whale-watching klasik. Delta 24h = sinyal akumulasi/build-up.
+async function sourceBitfinexMargin() {
+  const dayAgo = Date.now() - 24 * 3600 * 1000;
+  const [longNow, shortNow, longPrev, shortPrev] = await Promise.all([
+    fetchJSON('https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:tBTCUSD:long/last', 6000),
+    fetchJSON('https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:tBTCUSD:short/last', 6000),
+    fetchJSON(`https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:tBTCUSD:long/hist?limit=1&start=${dayAgo}&sort=1`, 6000).catch(() => null),
+    fetchJSON(`https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:tBTCUSD:short/hist?limit=1&start=${dayAgo}&sort=1`, 6000).catch(() => null),
+  ]);
+  const long  = Array.isArray(longNow)  ? +longNow[1]  : null;   // [ts, value] dalam BTC
+  const short = Array.isArray(shortNow) ? +shortNow[1] : null;
+  if (long == null || short == null) return null;
+  const longAgo  = Array.isArray(longPrev?.[0])  ? +longPrev[0][1]  : null;
+  const shortAgo = Array.isArray(shortPrev?.[0]) ? +shortPrev[0][1] : null;
+  const longDelta24hPct  = longAgo  ? ((long - longAgo) / longAgo) * 100   : null;
+  const shortDelta24hPct = shortAgo ? ((short - shortAgo) / shortAgo) * 100 : null;
+
+  // Bias whale dari perubahan posisi (bukan level absolut — long Bitfinex
+  // struktural selalu jauh lebih besar dari short)
+  let signal = 'NEUTRAL';
+  if (longDelta24hPct != null && shortDelta24hPct != null) {
+    if (longDelta24hPct > 2 && shortDelta24hPct <= 0.5)  signal = 'WHALE_LONG_BUILDUP';
+    else if (shortDelta24hPct > 3)                       signal = 'SHORT_BUILDUP';   // bahan squeeze
+    else if (longDelta24hPct < -2)                       signal = 'LONG_UNWIND';
+  }
+  return {
+    longBtc: long, shortBtc: short,
+    ratio: short > 0 ? +(long / short).toFixed(2) : null,
+    longDelta24hPct:  longDelta24hPct  != null ? +longDelta24hPct.toFixed(2)  : null,
+    shortDelta24hPct: shortDelta24hPct != null ? +shortDelta24hPct.toFixed(2) : null,
+    signal,
+  };
+}
+
+// ── §3.1 CFTC COT — posisi CME Bitcoin Futures (TANPA KEY, mingguan) ─────────
+// Satu-satunya data posisi institusi yang diaudit regulator. Snapshot Selasa,
+// rilis Jumat → sinyal LAMBAT, bobot untuk swing, bukan scalp.
+async function sourceCftcCot() {
+  const where = encodeURIComponent("market_and_exchange_names like 'BITCOIN - CHICAGO MERCANTILE EXCHANGE%'");
+  const order = encodeURIComponent('report_date_as_yyyy_mm_dd DESC');
+  const d = await fetchJSON(
+    `https://publicreporting.cftc.gov/resource/gpe5-46if.json?$limit=4&$order=${order}&$where=${where}`,
+    8000
+  );
+  if (!Array.isArray(d) || !d.length) return null;
+
+  // Field Socrata bisa bernama persis atau dengan suffix _all → cari defensif
+  const pick = (row, base) => {
+    if (row[base] != null) return +row[base];
+    if (row[base + '_all'] != null) return +row[base + '_all'];
+    const k = Object.keys(row).find(x => x.startsWith(base));
+    return k != null ? +row[k] : null;
+  };
+  const parseRow = (row) => ({
+    date: row.report_date_as_yyyy_mm_dd?.slice(0, 10) || null,
+    levLong:  pick(row, 'lev_money_positions_long'),
+    levShort: pick(row, 'lev_money_positions_short'),
+    amLong:   pick(row, 'asset_mgr_positions_long'),
+    amShort:  pick(row, 'asset_mgr_positions_short'),
+    openInterest: pick(row, 'open_interest'),
+  });
+  const latest = parseRow(d[0]);
+  const prev   = d.length > 1 ? parseRow(d[1]) : null;
+  if (latest.levLong == null && latest.amLong == null) return null;
+
+  const levNet = (latest.levLong ?? 0) - (latest.levShort ?? 0);
+  const amNet  = (latest.amLong ?? 0)  - (latest.amShort ?? 0);
+  const levNetPrev = prev ? (prev.levLong ?? 0) - (prev.levShort ?? 0) : null;
+  const amNetPrev  = prev ? (prev.amLong ?? 0)  - (prev.amShort ?? 0) : null;
+
+  return {
+    reportDate: latest.date,
+    leveragedFunds: { long: latest.levLong, short: latest.levShort, net: levNet,
+                      netDeltaWoW: levNetPrev != null ? levNet - levNetPrev : null },
+    assetManagers:  { long: latest.amLong, short: latest.amShort, net: amNet,
+                      netDeltaWoW: amNetPrev != null ? amNet - amNetPrev : null },
+    openInterest: latest.openInterest,
+    // Hedge fund net short ekstrem = sering basis trade, tapi PERUBAHAN mingguan informatif
+    levSignal: levNetPrev == null ? 'N/A'
+      : levNet - levNetPrev > 0 ? 'HEDGE_FUNDS_COVERING' : 'HEDGE_FUNDS_ADDING_SHORT',
+    amSignal: amNetPrev == null ? 'N/A'
+      : amNet - amNetPrev > 0 ? 'INSTITUSI_AKUMULASI' : 'INSTITUSI_DISTRIBUSI',
+  };
+}
+
+// ── §3.4 Deribit DVOL — implied volatility index (TANPA KEY) ─────────────────
+async function sourceDvol() {
+  const now = Date.now();
+  const weekAgo = now - 7 * 24 * 3600 * 1000;
+  const d = await fetchJSON(
+    `https://www.deribit.com/api/v2/public/get_volatility_index_data?currency=BTC&start_timestamp=${weekAgo}&end_timestamp=${now}&resolution=3600`,
+    7000
+  );
+  const data = d?.result?.data;
+  if (!Array.isArray(data) || data.length < 10) return null;
+  // Tiap row: [ts, open, high, low, close]
+  const closes = data.map(r => +r[4]).filter(v => !Number.isNaN(v));
+  const current = closes[closes.length - 1];
+  const min7d = Math.min(...closes);
+  const max7d = Math.max(...closes);
+  const avg7d = closes.reduce((a, b) => a + b, 0) / closes.length;
+  const range = max7d - min7d || 1;
+  const positionPct = ((current - min7d) / range) * 100;   // posisi dalam range 7d
+
+  let signal = 'NORMAL';
+  if (current < avg7d * 0.92 && positionPct < 20)      signal = 'VOL_COMPRESSED';  // komplasen → breakout menunggu
+  else if (current > avg7d * 1.15 && positionPct > 85) signal = 'VOL_SPIKE';        // panik → sering dekat bottom lokal
+
+  return {
+    current: +current.toFixed(2),
+    avg7d: +avg7d.toFixed(2),
+    min7d: +min7d.toFixed(2),
+    max7d: +max7d.toFixed(2),
+    positionPct: +positionPct.toFixed(0),
+    signal,
+  };
+}
+
+// ── §3.5 OKX liquidation orders (TANPA KEY) — pelengkap Bybit ────────────────
+async function sourceOkxLiquidations() {
+  const d = await fetchJSON(
+    'https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&instFamily=BTC-USDT&state=filled&limit=100',
+    7000
+  );
+  const details = d?.data?.[0]?.details;
+  if (!Array.isArray(details) || !details.length) return null;
+  const now = Date.now();
+  const CT_VAL = 0.01;   // 1 kontrak BTC-USDT-SWAP = 0.01 BTC
+  let longCount = 0, shortCount = 0, longUsd = 0, shortUsd = 0;
+  let recentLong = 0, recentShort = 0;
+  for (const ev of details) {
+    const isLong = ev.posSide === 'long';
+    const usd = (parseFloat(ev.sz) || 0) * CT_VAL * (parseFloat(ev.bkPx) || 0);
+    const recent = now - (+ev.ts || 0) < 30 * 60 * 1000;
+    if (isLong) { longCount++; longUsd += usd; if (recent) recentLong++; }
+    else        { shortCount++; shortUsd += usd; if (recent) recentShort++; }
+  }
+  const burst = recentLong > 10 || recentShort > 10;
+  return {
+    longLiqCount: longCount,
+    shortLiqCount: shortCount,
+    longLiqValueM:  +(longUsd / 1e6).toFixed(2),
+    shortLiqValueM: +(shortUsd / 1e6).toFixed(2),
+    recentBurst: burst,
+    burstDirection: burst ? (recentLong > recentShort ? 'LONG_LIQUIDATED' : 'SHORT_LIQUIDATED') : null,
+    source: 'OKX SWAP BTC-USDT 100 events',
+  };
+}
+
+// ── §4.1 Coinbase Premium — institusi & retail US (TANPA KEY) ────────────────
+// Premium dihitung di handler (butuh harga Binance dari snapshot).
+async function sourceCoinbaseTicker() {
+  const d = await fetchJSON('https://api.exchange.coinbase.com/products/BTC-USD/ticker', 6000);
+  const price = parseFloat(d?.price);
+  return price > 0 ? { price } : null;
+}
+
+// ── §4.2 Kimchi Premium — retail Asia (TANPA KEY) ────────────────────────────
+async function sourceKimchi() {
+  const [upbit, fx] = await Promise.all([
+    fetchJSON('https://api.upbit.com/v1/ticker?markets=KRW-BTC', 6000),
+    fetchJSON('https://open.er-api.com/v6/latest/USD', 6000),
+  ]);
+  const krwPrice = upbit?.[0]?.trade_price;
+  const usdkrw = fx?.rates?.KRW;
+  if (!krwPrice || !usdkrw) return null;
+  return { upbitUsd: krwPrice / usdkrw, usdkrw };
+}
+
+// ── §4.3 CME Gap — magnet harga weekend (TANPA KEY via Yahoo BTC=F) ──────────
+async function sourceCmeGap() {
+  const d = await fetchJSON(
+    'https://query1.finance.yahoo.com/v8/finance/chart/BTC=F?interval=1d&range=10d',
+    6000
+  );
+  const res = d?.chart?.result?.[0];
+  const q = res?.indicators?.quote?.[0];
+  const ts = res?.timestamp;
+  if (!q?.close || !ts) return null;
+  // Filter baris valid
+  const rows = ts.map((t, i) => ({
+    t: t * 1000, open: q.open?.[i], high: q.high?.[i], low: q.low?.[i], close: q.close?.[i],
+  })).filter(r => r.open != null && r.close != null);
+  if (rows.length < 3) return null;
+
+  const spot = res?.meta?.regularMarketPrice ?? rows[rows.length - 1].close;
+  // Cari gap terbaru yang BELUM tertutup: open sesi i ≠ close sesi i-1
+  for (let i = rows.length - 1; i >= 1; i--) {
+    const prevClose = rows[i - 1].close;
+    const open = rows[i].open;
+    const gapPct = ((open - prevClose) / prevClose) * 100;
+    if (Math.abs(gapPct) < 0.3) continue;   // gap kecil, abaikan
+    // Gap terisi kalau ada candle SETELAHNYA yang menyentuh level prevClose
+    let filled = false;
+    for (let j = i; j < rows.length; j++) {
+      if (rows[j].low != null && rows[j].high != null
+          && rows[j].low <= prevClose && rows[j].high >= prevClose) { filled = true; break; }
+    }
+    if (!filled) {
+      return {
+        level: Math.round(prevClose),
+        gapPct: +gapPct.toFixed(2),
+        direction: spot > prevClose ? 'BELOW_PRICE' : 'ABOVE_PRICE',   // posisi magnet vs harga
+        ageDays: Math.round((Date.now() - rows[i].t) / 86400000),
+        note: 'Gap CME yang belum tertutup — historis sangat sering di-fill (magnet harga)',
+      };
+    }
+  }
+  return { level: null, note: 'Tidak ada gap CME terbuka saat ini' };
+}
+
+// ── §5.3 Polymarket — prediction market odds (TANPA KEY, eksperimental) ──────
+async function sourcePolymarket() {
+  const d = await fetchJSON(
+    'https://gamma-api.polymarket.com/markets?closed=false&limit=40&order=volume24hr&ascending=false',
+    7000
+  );
+  if (!Array.isArray(d)) return null;
+  const parse = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : v; } catch (_) { return null; } };
+  const btcMarkets = d
+    .filter(m => /bitcoin|btc/i.test(m?.question || ''))
+    .slice(0, 3)
+    .map(m => {
+      const outcomes = parse(m.outcomes) || [];
+      const prices = parse(m.outcomePrices) || [];
+      const yesIdx = outcomes.findIndex(o => /^yes$/i.test(o));
+      const yesProb = yesIdx >= 0 && prices[yesIdx] != null ? +(+prices[yesIdx] * 100).toFixed(1) : null;
+      return { question: m.question, yesProbPct: yesProb, volume24h: m.volume24hr != null ? Math.round(+m.volume24hr) : null };
+    })
+    .filter(m => m.yesProbPct != null);
+  return btcMarkets.length ? { markets: btcMarkets } : null;
+}
+
+// ── §5.4 Miner pressure proxy — blockchain.info charts (TANPA KEY) ───────────
+async function sourceMinerPressure() {
+  const [hash, rev] = await Promise.all([
+    fetchJSON('https://api.blockchain.info/charts/hash-rate?timespan=30days&format=json&cors=true', 7000).catch(() => null),
+    fetchJSON('https://api.blockchain.info/charts/miners-revenue?timespan=30days&format=json&cors=true', 7000).catch(() => null),
+  ]);
+  const hv = hash?.values?.map(v => +v.y).filter(v => v > 0);
+  const rv = rev?.values?.map(v => +v.y).filter(v => v > 0);
+  if (!hv?.length) return null;
+  const hashNow = hv[hv.length - 1];
+  const hashPeak30d = Math.max(...hv);
+  const hashFromPeakPct = ((hashNow - hashPeak30d) / hashPeak30d) * 100;
+  let revFromPeakPct = null;
+  if (rv?.length) {
+    const revNow = rv[rv.length - 1];
+    revFromPeakPct = ((revNow - Math.max(...rv)) / Math.max(...rv)) * 100;
+  }
+  let signal = 'NORMAL';
+  if (hashFromPeakPct < -10 && (revFromPeakPct == null || revFromPeakPct < -15)) signal = 'MINER_STRESS';      // tekanan jual miner
+  else if (hashFromPeakPct > -2)                                                 signal = 'HASHRATE_STRONG';   // sehat
+  return {
+    hashFromPeak30dPct: +hashFromPeakPct.toFixed(1),
+    revFromPeak30dPct: revFromPeakPct != null ? +revFromPeakPct.toFixed(1) : null,
+    signal,
+  };
+}
+
+// =============================================================================
+//  NEW v8: FREE-KEY sources (BYOK via header — key tidak pernah di repo)
+// =============================================================================
+
+// ── §2.4 FRED — makro resmi (FREE KEY: x-fred-key) ───────────────────────────
+async function sourceFred(apiKey) {
+  if (!apiKey) return null;
+  const get = async (series) => {
+    const d = await fetchJSON(
+      `https://api.stlouisfed.org/fred/series/observations?series_id=${series}&api_key=${apiKey}&file_type=json&sort_order=desc&limit=5`,
+      7000
+    ).catch(() => null);
+    const obs = d?.observations?.find(o => o.value !== '.');
+    return obs ? { value: +obs.value, date: obs.date } : null;
+  };
+  const [vix, us10y, dxyBroad] = await Promise.all([get('VIXCLS'), get('DGS10'), get('DTWEXBGS')]);
+  if (!vix && !us10y && !dxyBroad) return null;
+  return { vix, us10y, dxyBroad };
+}
+
+// ── §5.2 CryptoPanic — news + voting bullish/bearish (FREE KEY) ──────────────
+async function sourceCryptoPanic(apiKey) {
+  if (!apiKey) return null;
+  const d = await fetchJSON(
+    `https://cryptopanic.com/api/v1/posts/?auth_token=${apiKey}&currencies=BTC&filter=hot&public=true`,
+    7000
+  );
+  if (!d?.results?.length) return null;
+  return d.results.slice(0, 8).map(p => ({
+    title: p.title,
+    source: p.source?.title || 'CryptoPanic',
+    ts: p.published_at ? new Date(p.published_at).getTime() : Date.now(),
+    url: p.url,
+    bullishVotes: p.votes?.positive ?? null,
+    bearishVotes: p.votes?.negative ?? null,
+  }));
+}
+
+// ── §5.1 bitcoin-data.com (BGeometrics) — NUPL (rate limit KETAT 8 req/jam) ──
+// HANYA di-fetch kalau browser kirim header 'x-fetch-nupl: 1' (cache client
+// stale > 24 jam). Key opsional via 'x-btcdata-key'.
+async function sourceNupl(apiKey) {
+  const headers = { 'accept': 'application/json' };
+  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const r = await fetch('https://bitcoin-data.com/v1/nupl/last', { signal: ctrl.signal, headers });
+    if (!r.ok) throw new Error(`bitcoin-data HTTP ${r.status}`);
+    const d = await r.json();
+    const nupl = parseFloat(d?.nupl ?? d?.value);
+    if (Number.isNaN(nupl)) return null;
+    let signal = 'NEUTRAL';
+    if (nupl >= 0.75)      signal = 'EUPHORIA';        // bias distribusi/SHORT swing
+    else if (nupl >= 0.5)  signal = 'BELIEF_GREED';
+    else if (nupl >= 0.25) signal = 'OPTIMISM';
+    else if (nupl >= 0)    signal = 'HOPE_FEAR';
+    else                   signal = 'CAPITULATION';    // akumulasi/LONG swing
+    return { nupl: +nupl.toFixed(3), date: d?.d || null, signal };
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+// =============================================================================
 //  COMPUTED SIGNALS — dihitung dari data existing, tanpa API tambahan
 // =============================================================================
+
+// ── §6.1 Regime Matrix: Price × OI × Funding — siapa penggerak harga? ────────
+function computeMarketRegime(snapshot) {
+  const dPrice = snapshot.ticker?.change24h;
+  const dOI = snapshot.openInterest?.change24h;
+  const funding = snapshot.funding?.fundingRate;
+  if (dPrice == null || dOI == null || funding == null) return null;
+
+  const pUp = dPrice > 0.3, pDown = dPrice < -0.3;
+  const oiUp = dOI > 1, oiDown = dOI < -1;
+  const fHigh = funding > 0.01, fNeg = funding < -0.005;
+
+  let label, drivenBy, healthScore, note;
+  if (pUp && oiUp && fHigh) {
+    label = 'LEVERAGED_RALLY'; drivenBy = 'LEVERAGE_LONG'; healthScore = 55;
+    note = 'Long baru masuk pakai leverage — LONG valid tapi rawan squeeze jika funding makin ekstrem';
+  } else if (pUp && oiUp) {
+    label = 'SPOT_LED_RALLY'; drivenBy = 'SPOT'; healthScore = 85;
+    note = 'Rally paling sehat — OI naik tapi funding flat/negatif berarti spot buying yang dorong';
+  } else if (pUp && oiDown) {
+    label = 'SHORT_COVERING'; drivenBy = 'SHORT_COVER'; healthScore = 35;
+    note = 'Rally lemah — naik karena short tutup posisi, bukan demand baru. Jangan kejar, tunggu OI naik';
+  } else if (pDown && oiUp) {
+    label = 'NEW_SHORTS_AGGRESSIVE'; drivenBy = 'LEVERAGE_SHORT'; healthScore = 40;
+    note = 'Short baru agresif masuk — SHORT valid tapi waspada crowded short (bahan squeeze)';
+  } else if (pDown && oiDown && fHigh) {
+    label = 'LONG_LIQUIDATION'; drivenBy = 'DELEVERAGING'; healthScore = 25;
+    note = 'Long dipaksa keluar (deleveraging) — tunggu washout selesai, sering disusul reversal LONG';
+  } else if (pDown && oiDown) {
+    label = 'POSITION_CLOSING'; drivenBy = 'DELEVERAGING'; healthScore = 30;
+    note = 'Posisi ditutup, minat hilang — WAIT sampai ada arah baru';
+  } else {
+    label = 'RANGING'; drivenBy = 'NEUTRAL'; healthScore = 50;
+    note = 'Tidak ada penggerak dominan — pasar ranging';
+  }
+  return { label, drivenBy, healthScore, note,
+           inputs: { priceChange24h: dPrice, oiChange24h: dOI, fundingPct: funding } };
+}
+
+// ── §6.2 Cross-Venue Positioning Matrix — confluence bandarmologi riil ───────
+function computeCrossVenue(snapshot) {
+  const rows = [];
+  const add = (venue, cohort, bias, detail) => rows.push({ venue, cohort, bias, detail });
+
+  const ls = snapshot.longShort;
+  if (ls?.topTrader?.current != null) {
+    const v = ls.topTrader.current;
+    add('Binance top traders', 'Whale CEX',
+        v > 1.05 ? 'LONG' : v < 0.95 ? 'SHORT' : 'NEUTRAL', `L/S ${v.toFixed(2)}`);
+  }
+  const okx = snapshot.okxFlow;
+  if (okx?.longShortRatio != null) {
+    add('OKX top traders', 'Whale CEX Asia',
+        okx.bias === 'LONG_DOMINANT' ? 'LONG' : okx.bias === 'SHORT_DOMINANT' ? 'SHORT' : 'NEUTRAL',
+        `L/S ${okx.longShortRatio}`);
+  }
+  const bfx = snapshot.bitfinexMargin;
+  if (bfx) {
+    const ld = bfx.longDelta24hPct, sd = bfx.shortDelta24hPct;
+    let bias = 'NEUTRAL';
+    if (ld != null && sd != null) {
+      if (ld - sd > 1)       bias = 'LONG';
+      else if (sd - ld > 1)  bias = 'SHORT';
+    }
+    add('Bitfinex margin', 'Whale legacy', bias,
+        `Δ24h long ${ld != null ? ld + '%' : '—'} / short ${sd != null ? sd + '%' : '—'}`);
+  }
+  const hl = snapshot.hyperliquid;
+  if (hl?.funding8hPct != null) {
+    add('Hyperliquid', 'Whale DEX',
+        hl.funding8hPct > 0.005 ? 'LONG' : hl.funding8hPct < -0.005 ? 'SHORT' : 'NEUTRAL',
+        `funding 8h-eq ${hl.funding8hPct}%`);
+  }
+  const cot = snapshot.cftcCot;
+  if (cot?.leveragedFunds?.netDeltaWoW != null) {
+    add('CME lev funds (COT)', 'Hedge funds',
+        cot.leveragedFunds.netDeltaWoW > 0 ? 'LONG' : 'SHORT',
+        `ΔWoW net ${cot.leveragedFunds.netDeltaWoW} kontrak (mingguan)`);
+  }
+  if (cot?.assetManagers?.netDeltaWoW != null) {
+    add('CME asset mgr (COT)', 'Institusi long-only',
+        cot.assetManagers.netDeltaWoW > 0 ? 'LONG' : 'SHORT',
+        `ΔWoW net ${cot.assetManagers.netDeltaWoW} kontrak (mingguan)`);
+  }
+
+  if (rows.length < 3) return null;
+  const long = rows.filter(r => r.bias === 'LONG').length;
+  const short = rows.filter(r => r.bias === 'SHORT').length;
+  const total = rows.length;
+  const dominant = long > short ? 'LONG' : short > long ? 'SHORT' : 'SPLIT';
+  const maxSide = Math.max(long, short);
+  return {
+    rows,
+    venueAgreement: { long, short, neutral: total - long - short, total,
+                      verdict: `${maxSide}/${total} ${dominant}` },
+    confluence: dominant === 'SPLIT' ? 'SPLIT'
+      : (maxSide >= 4 && maxSide / total >= 0.7) ? 'STRONG'
+      : maxSide >= Math.ceil(total / 2) + 1 ? 'MODERATE' : 'WEAK',
+    dominant,
+  };
+}
+
+// ── §6.3 Squeeze Fuel Indicator — bedakan "bearish" vs "bahan squeeze" ───────
+function computeSqueezeFuel(snapshot) {
+  let shortSqueezePts = 0, longSqueezePts = 0;
+  const components = [];
+
+  const funding = snapshot.funding?.fundingRate;
+  if (funding != null) {
+    if (funding <= -0.03) { shortSqueezePts += 25; components.push('funding negatif ekstrem (short crowded)'); }
+    else if (funding >= 0.05) { longSqueezePts += 25; components.push('funding positif ekstrem (long crowded)'); }
+  }
+  const fb = snapshot.futuresBasis;
+  if (fb) {
+    if (fb.regime === 'BACKWARDATION_BEARISH') { shortSqueezePts += 15; components.push('basis backwardation (hedging berat)'); }
+    else if (fb.regime === 'CONTANGO_BULLISH') { longSqueezePts += 15; components.push('basis contango tinggi (long premium)'); }
+  }
+  const lm = snapshot.liqMagnets;
+  const price = snapshot.ticker?.price;
+  if (lm && price) {
+    if (Math.abs(price - lm.upMagnet.from) / price < 0.015)   { shortSqueezePts += 20; components.push('klaster short-liq < 1.5% di atas harga'); }
+    if (Math.abs(price - lm.downMagnet.to) / price < 0.015)   { longSqueezePts += 20; components.push('klaster long-liq < 1.5% di bawah harga'); }
+  }
+  const bfx = snapshot.bitfinexMargin;
+  if (bfx) {
+    if (bfx.shortDelta24hPct != null && bfx.shortDelta24hPct > 3) { shortSqueezePts += 20; components.push('Bitfinex short build-up 24h'); }
+    if (bfx.longDelta24hPct != null && bfx.longDelta24hPct > 3)   { longSqueezePts += 20; components.push('Bitfinex long build-up 24h'); }
+  }
+  const hl = snapshot.hyperliquid;
+  if (hl?.funding8hPct != null) {
+    if (hl.funding8hPct <= -0.03)     { shortSqueezePts += 10; components.push('Hyperliquid funding negatif (whale DEX short)'); }
+    else if (hl.funding8hPct >= 0.05) { longSqueezePts += 10; components.push('Hyperliquid funding tinggi (whale DEX long)'); }
+  }
+
+  const score = Math.min(Math.max(shortSqueezePts, longSqueezePts), 100);
+  if (score < 20) return { direction: 'NONE', score, components: [] };
+  return {
+    // SHORT_SQUEEZE = bahan bakar naik menumpuk (jangan SHORT sembarangan)
+    // LONG_SQUEEZE = bahan bakar turun menumpuk (jangan LONG sembarangan)
+    direction: shortSqueezePts >= longSqueezePts ? 'SHORT_SQUEEZE' : 'LONG_SQUEEZE',
+    score,
+    components,
+  };
+}
+
+// ── Agregat likuidasi lintas bursa (Bybit + OKX) — §3.5 ──────────────────────
+function computeAggregateLiquidations(snapshot) {
+  const by = snapshot.bybitLiquidations;
+  const ok = snapshot.okxLiquidations;
+  if (!by && !ok) return null;
+  const longM  = (by?.longLiqValueM ?? 0)  + (ok?.longLiqValueM ?? 0);
+  const shortM = (by?.shortLiqValueM ?? 0) + (ok?.shortLiqValueM ?? 0);
+  const bothBurst = !!(by?.recentBurst && ok?.recentBurst);
+  const sameDirection = bothBurst && by.burstDirection === ok.burstDirection;
+  return {
+    venues: [by ? 'Bybit' : null, ok ? 'OKX' : null].filter(Boolean),
+    totalLongLiqM: +longM.toFixed(2),
+    totalShortLiqM: +shortM.toFixed(2),
+    // Burst serentak 2 bursa = washout/squeeze JAUH lebih meyakinkan dari 1 bursa
+    crossVenueBurst: sameDirection ? by.burstDirection : null,
+    signal: sameDirection
+      ? (by.burstDirection === 'LONG_LIQUIDATED' ? 'CONFIRMED_LONG_WASHOUT' : 'CONFIRMED_SHORT_SQUEEZE')
+      : 'NO_CROSS_CONFIRMATION',
+  };
+}
 
 /** Funding Rate Divergence Score: seberapa "tidak kompak" exchange soal arah funding */
 function computeFundingDivergence(binanceFunding, multiFunding) {
@@ -1167,6 +1725,21 @@ function computeSmartMoneyScore(snapshot) {
     if (sc.liquiditySignal === 'EXPANDING')   bullPts += w;
     else if (sc.liquiditySignal === 'CONTRACTING') bearPts += w;
     else { bullPts += w * 0.5; bearPts += w * 0.5; }
+    totalWeight += w;
+  }
+
+  // v8: Cross-venue positioning matrix (bobot 15%) — confluence bandarmologi
+  // sesungguhnya: Binance/OKX/Bitfinex/Hyperliquid/CME searah atau split?
+  const cv = snapshot.crossVenue;
+  if (cv?.venueAgreement) {
+    const w = 15;
+    const { long, short, total } = cv.venueAgreement;
+    if (cv.confluence === 'STRONG') {
+      if (cv.dominant === 'LONG') bullPts += w; else if (cv.dominant === 'SHORT') bearPts += w;
+    } else if (total > 0) {
+      bullPts += w * (long / total);
+      bearPts += w * (short / total);
+    }
     totalWeight += w;
   }
 
@@ -1279,36 +1852,60 @@ const SOURCES = [
   ['onChain',          sourceCoinMetrics,          true],   // MVRV
   ['onChainExt',       sourceCoinMetricsExtended,  true],   // v7: NVT, SOPR, CapNuvt
   ['stablecoins',      sourceStablecoins,          true],   // v6: dry powder
-  ['etfFlows',         sourceEtfFlows,             true],   // v6: ETF institutional flow
   ['multiFunding',     sourceMultiFunding,         true],   // v6: cross-exchange funding
   ['okxFlow',          sourceOkxFlow,              true],   // v7: OKX top trader L/S
   ['bybitLiquidations',sourceBybitLiquidations,    true],   // v7: real liquidation events
   ['futuresBasis',     sourceFuturesBasis,         true],   // v7: perp mark vs index basis
-  ['macro',            sourceMacro,                true],
+  // ── v8: positioning whale & institusi (KEBUTUHAN_SINYAL §3-5) ─────────────
+  ['hyperliquid',      sourceHyperliquid,          true],   // §3.2 perp DEX whale
+  ['bitfinexMargin',   sourceBitfinexMargin,       true],   // §3.3 margin positions
+  ['cftcCot',          sourceCftcCot,              true],   // §3.1 CME COT mingguan
+  ['dvol',             sourceDvol,                 true],   // §3.4 implied volatility
+  ['okxLiquidations',  sourceOkxLiquidations,      true],   // §3.5 pelengkap Bybit
+  ['coinbaseTicker',   sourceCoinbaseTicker,       true],   // §4.1 premium dihitung di handler
+  ['kimchiRaw',        sourceKimchi,               true],   // §4.2 premium dihitung di handler
+  ['cmeGap',           sourceCmeGap,               true],   // §4.3 magnet gap CME
+  ['polymarket',       sourcePolymarket,           true],   // §5.3 eksperimental
+  ['minerPressure',    sourceMinerPressure,        true],   // §5.4 proxy kapitulasi miner
+  ['macro',            sourceMacro,                true],   // v8: Yahoo primary, Stooq fallback
   ['fearGreed',        sourceFearGreed,            false],
-  // ['coingecko',     sourceCoinGecko,            true],   // dihapus — sering 429
   ['global',           sourceGlobal,               true],
   ['mempool',          sourceMempool,              true],
   ['network',          sourceNetwork,              true],
   ['news',             sourceNews,                 true],
 ];
 
+// Keyed sources (BYOK via header) — [label, headerFn]
+// etfFlows pindah ke sini (SoSoValue Open API butuh free key, endpoint lama mati)
+const KEYED_SOURCES = [
+  ['coinalyze', (h) => { const k = h('x-coinalyze-key'); return k ? sourceCoinalyze(k) : null; }],
+  ['etfFlows',  (h) => { const k = h('x-soso-key');      return k ? sourceEtfFlows(k) : null; }],
+  ['fred',      (h) => { const k = h('x-fred-key');      return k ? sourceFred(k) : null; }],
+  ['newsCp',    (h) => { const k = h('x-cryptopanic-key'); return k ? sourceCryptoPanic(k) : null; }],
+  // NUPL: rate limit brutal (8 req/jam) → hanya fetch kalau browser minta
+  // eksplisit (cache localStorage-nya stale > 24 jam)
+  ['nupl',      (h) => h('x-fetch-nupl') === '1' ? sourceNupl(h('x-btcdata-key') || '') : null],
+];
+
 export default async function handler(request) {
   const t0 = Date.now();
 
-  // Coinalyze key dikirim browser via header (opsional, key gratis dari coinalyze.net)
-  let coinalyzeKey = '';
-  try {
-    coinalyzeKey = request?.headers?.get?.('x-coinalyze-key') || '';
-  } catch (_) {}
+  // Header reader — semua FREE KEY dikirim browser via header (pola BYOK,
+  // key tidak pernah hardcoded di repo)
+  const getHeader = (name) => {
+    try { return request?.headers?.get?.(name) || ''; } catch (_) { return ''; }
+  };
 
-  // Jalankan semua source + Coinalyze (kalau ada key) paralel
+  // Jalankan semua source (no-key + keyed) paralel
   const sourcePromises = SOURCES.map(([, fn]) => fn());
-  sourcePromises.push(coinalyzeKey ? sourceCoinalyze(coinalyzeKey) : Promise.resolve(null));
+  const keyedPromises = KEYED_SOURCES.map(([, fn]) => {
+    const p = fn(getHeader);
+    return p == null ? Promise.resolve(null) : p;
+  });
 
-  const results = await Promise.allSettled(sourcePromises);
+  const results = await Promise.allSettled([...sourcePromises, ...keyedPromises]);
 
-  const snapshot = { ts: Date.now(), version: 7 };
+  const snapshot = { ts: Date.now(), version: 8 };
   const errors = [];      // sumber KRITIS yang gagal (perlu perhatian)
   const degraded = [];    // sumber OPSIONAL yang gagal (tidak masalah)
 
@@ -1324,14 +1921,21 @@ export default async function handler(request) {
     }
   });
 
-  // Proses Coinalyze (entry terakhir)
-  const czResult = results[results.length - 1];
-  if (coinalyzeKey) {
-    if (czResult.status === 'fulfilled' && czResult.value) {
-      snapshot.coinalyze = czResult.value;
+  // Proses keyed sources
+  KEYED_SOURCES.forEach(([label], j) => {
+    const r = results[SOURCES.length + j];
+    if (r.status === 'fulfilled') {
+      if (r.value != null) snapshot[label] = r.value;
     } else {
-      degraded.push({ source: 'coinalyze', msg: String(czResult.reason?.message || 'no data / key invalid').slice(0, 150) });
+      degraded.push({ source: label, msg: String(r.reason?.message || 'no data / key invalid').slice(0, 150) });
     }
+  });
+
+  // CryptoPanic (JSON + votes bullish/bearish) menggantikan news RSS bila ada
+  if (snapshot.newsCp?.length) {
+    snapshot.news = snapshot.newsCp;
+    snapshot.newsSource = 'cryptopanic';
+    delete snapshot.newsCp;
   }
 
   // ─── v7: Fix realized price — gunakan harga Binance realtime (bukan harga CoinMetrics stale 24h)
@@ -1340,15 +1944,64 @@ export default async function handler(request) {
       ((snapshot.ticker.price - snapshot.onChain.realizedPrice) / snapshot.onChain.realizedPrice) * 100;
   }
 
-  // ─── v7: Computed bandarmologi signals (from data already fetched) ────────
-  snapshot.fundingDivergence  = computeFundingDivergence(snapshot.funding, snapshot.multiFunding);
-  snapshot.smartMoneyScore    = computeSmartMoneyScore(snapshot);
-  // cascadeProbability dihitung setelah liqMagnets siap (lihat bawah)
+  // ─── v8 §4.1: Coinbase Premium — tekanan beli US (institusi + ETF creation)
+  if (snapshot.coinbaseTicker?.price && snapshot.ticker?.price) {
+    const premiumPct = ((snapshot.coinbaseTicker.price - snapshot.ticker.price) / snapshot.ticker.price) * 100;
+    snapshot.coinbasePremium = {
+      coinbasePrice: snapshot.coinbaseTicker.price,
+      binancePrice: snapshot.ticker.price,
+      premiumPct: +premiumPct.toFixed(4),
+      // Nilai absolut kecil (±0.0x%) — deviasi yang penting
+      signal: premiumPct > 0.05 ? 'US_BUYING' : premiumPct < -0.05 ? 'US_SELLING' : 'NEUTRAL',
+    };
+    delete snapshot.coinbaseTicker;
+  }
+
+  // ─── v8 §4.2: Kimchi Premium — euforia/ketakutan retail Asia ──────────────
+  if (snapshot.kimchiRaw?.upbitUsd && snapshot.ticker?.price) {
+    const kimchiPct = ((snapshot.kimchiRaw.upbitUsd - snapshot.ticker.price) / snapshot.ticker.price) * 100;
+    snapshot.kimchiPremium = {
+      upbitUsd: +snapshot.kimchiRaw.upbitUsd.toFixed(0),
+      premiumPct: +kimchiPct.toFixed(2),
+      signal: kimchiPct > 3 ? 'ASIA_EUPHORIA'        // historis dekat top lokal (kontrarian SHORT)
+            : kimchiPct < -1 ? 'ASIA_FEAR'           // sering dekat bottom
+            : 'NEUTRAL',
+    };
+    delete snapshot.kimchiRaw;
+  }
+
+  // ─── v8 §3.2: Funding divergence CEX vs DEX (Hyperliquid) ─────────────────
+  if (snapshot.hyperliquid?.funding8hPct != null) {
+    const cexRates = [
+      snapshot.funding?.fundingRate,
+      snapshot.multiFunding?.bybit,
+      snapshot.multiFunding?.okx,
+    ].filter(v => v != null);
+    if (cexRates.length) {
+      const cexAvg = cexRates.reduce((a, b) => a + b, 0) / cexRates.length;
+      const div = snapshot.hyperliquid.funding8hPct - cexAvg;
+      snapshot.hyperliquid.cexFundingAvg = +cexAvg.toFixed(4);
+      snapshot.hyperliquid.fundingDivergence = +div.toFixed(4);
+      // Divergen besar = whale DEX positioning beda dari retail CEX → kontrarian
+      snapshot.hyperliquid.divergenceSignal =
+        div > 0.02 ? 'DEX_MORE_BULLISH' : div < -0.02 ? 'DEX_MORE_BEARISH' : 'ALIGNED';
+    }
+  }
 
   // ─── v6: Estimasi level magnet likuidasi (computed, selalu ada) ──────────
   if (snapshot.ticker?.price) {
     snapshot.liqMagnets = computeLiquidationMagnets(snapshot.ticker.price);
   }
+
+  // ─── v8: Sinyal komposit (KEBUTUHAN_SINYAL §6) — urutan penting ──────────
+  snapshot.marketRegime          = computeMarketRegime(snapshot);          // §6.1
+  snapshot.crossVenue            = computeCrossVenue(snapshot);            // §6.2
+  snapshot.squeezeFuel           = computeSqueezeFuel(snapshot);           // §6.3 (butuh liqMagnets)
+  snapshot.aggregateLiquidations = computeAggregateLiquidations(snapshot); // §3.5
+
+  // ─── v7: Computed bandarmologi signals (smartMoneyScore butuh crossVenue) ─
+  snapshot.fundingDivergence  = computeFundingDivergence(snapshot.funding, snapshot.multiFunding);
+  snapshot.smartMoneyScore    = computeSmartMoneyScore(snapshot);
 
   // ─── v7: Cascade probability (butuh liqMagnets dari atas) ────────────────
   snapshot.cascadeProbability = computeCascadeProbability(snapshot);
@@ -1431,6 +2084,23 @@ export default async function handler(request) {
     };
     trim('h1', 50); trim('h4', 50); trim('d1', 30);
   }
+
+  // ─── v8: Source health — supaya endpoint mati KETAHUAN, tidak senyap ──────
+  // (pelajaran dari kasus ETF DefiLlama yang dead-code berbulan-bulan)
+  const KEY_HEADER = { coinalyze: 'x-coinalyze-key', etfFlows: 'x-soso-key', fred: 'x-fred-key', newsCp: 'x-cryptopanic-key', nupl: 'x-fetch-nupl' };
+  snapshot.sourceHealth = [
+    ...SOURCES.map(([label, , optional]) => ({
+      source: label,
+      ok: snapshot[label] != null,
+      optional,
+    })),
+    ...KEYED_SOURCES.map(([label]) => ({
+      source: label === 'newsCp' ? 'cryptopanic' : label,
+      ok: (label === 'newsCp' ? snapshot.newsSource === 'cryptopanic' : snapshot[label] != null),
+      optional: true,
+      needsKey: !getHeader(KEY_HEADER[label]),
+    })),
+  ];
 
   snapshot.errors = errors;
   snapshot.degraded = degraded;

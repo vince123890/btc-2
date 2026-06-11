@@ -25,6 +25,12 @@ const STORAGE_MODEL = 'btc_bandarmologi_gemini_model';
 const STORAGE_GROUNDING = 'btc_bandarmologi_gemini_grounding';
 const STORAGE_MODE = 'btc_bandarmologi_analysis_mode';
 const STORAGE_CGKEY = 'btc_bandarmologi_coinalyze_key';
+// v8: FREE KEY tambahan (semua opsional & gratis — pola BYOK seperti Coinalyze)
+const STORAGE_DATAKEYS = 'btc_bandarmologi_data_keys';     // JSON {soso, fred, cryptopanic, btcdata}
+// v8: cache client-side untuk sumber lambat/rate-limit ketat (Edge tetap stateless)
+const SLOW_CACHE_KEY = 'btc_bandarmologi_slow_cache';      // JSON {nupl:{ts,data}, etf:{ts,data}}
+const TTL_NUPL_MS = 24 * 3600 * 1000;   // bitcoin-data.com: 8 req/jam, 15/hari → 1×/hari cukup (data harian)
+const TTL_ETF_MS  = 4 * 3600 * 1000;    // ETF flow update harian → 4 jam aman
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -80,6 +86,7 @@ const state = {
   analysisMode: 'council',      // ← v5: 'quick' (1 call) | 'council' (multi-agent)
   councilPhase: null,           // ← v5: 'debate' | 'judge' | 'final' | null
   coinalyzeKey: '',             // ← v6: Coinalyze API key (opsional, GRATIS, terpisah dari Gemini)
+  dataKeys: { soso: '', fred: '', cryptopanic: '', btcdata: '' },  // ← v8: FREE KEY opsional
   // Settings panel
   showSettings: false,
   showKeyValue: false,
@@ -97,7 +104,18 @@ try {
   state.grounding = localStorage.getItem(STORAGE_GROUNDING) === 'true';
   state.analysisMode = localStorage.getItem(STORAGE_MODE) || 'council';
   state.coinalyzeKey = localStorage.getItem(STORAGE_CGKEY) || '';
+  const dk = JSON.parse(localStorage.getItem(STORAGE_DATAKEYS) || '{}');
+  state.dataKeys = { soso: dk.soso || '', fred: dk.fred || '', cryptopanic: dk.cryptopanic || '', btcdata: dk.btcdata || '' };
 } catch (_) { /* localStorage blocked → in-memory only */ }
+
+// ── v8: cache client-side untuk sumber lambat (NUPL 24h, ETF 4h) ─────────────
+function readSlowCache() {
+  try { return JSON.parse(localStorage.getItem(SLOW_CACHE_KEY) || '{}'); } catch (_) { return {}; }
+}
+function writeSlowCache(cache) {
+  try { localStorage.setItem(SLOW_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
+}
+const cacheStale = (entry, ttl) => !entry?.ts || (Date.now() - entry.ts) > ttl;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Formatters
@@ -230,8 +248,13 @@ function buildDataSection(s) {
   // sf = safe toFixed — tidak pernah throw meski v null/NaN/undefined
   const sf = (v, d = 2) => (v != null && !Number.isNaN(+v)) ? Number(v).toFixed(d) : '—';
 
+  // v8: CryptoPanic menambah voting bullish/bearish per berita
   const newsLines = (s.news && s.news.length > 0)
-    ? s.news.slice(0, 8).map((n, i) => `${i + 1}. [${n.source}] ${n.title}`).join('\n')
+    ? s.news.slice(0, 8).map((n, i) => {
+        const votes = (n.bullishVotes != null || n.bearishVotes != null)
+          ? ` (votes: ${n.bullishVotes ?? 0} bullish / ${n.bearishVotes ?? 0} bearish)` : '';
+        return `${i + 1}. [${n.source}] ${n.title}${votes}`;
+      }).join('\n')
     : '(berita tidak tersedia)';
 
   const oi = s.openInterest, ls = s.longShort, tv = s.takerVolume;
@@ -294,12 +317,16 @@ function buildDataSection(s) {
 • MVRV percentile (30d): ${num(oc.mvrvPercentile30d, 0)}%` : '';
 
   const mc = s.macro;
-  const macroBlock = mc ? `
-═══ MACRO CONTEXT (Stooq) ═══
-• DXY: ${mc.dxy?.close != null ? sf(mc.dxy.close, 2) + ' (' + (mc.dxy.changePct >= 0 ? '+' : '') + sf(mc.dxy.changePct, 2) + '%)' : 'N/A'}
-• Gold: ${mc.gold?.close != null ? '$' + sf(mc.gold.close, 0) + ' (' + (mc.gold.changePct >= 0 ? '+' : '') + sf(mc.gold.changePct, 2) + '%)' : 'N/A'}
-• S&P 500: ${mc.spx?.close != null ? sf(mc.spx.close, 0) + ' (' + (mc.spx.changePct >= 0 ? '+' : '') + sf(mc.spx.changePct, 2) + '%)' : 'N/A'}
-• Risk regime: ${mc.riskRegime?.replace('_', ' ') ?? 'N/A'}` : '';
+  const fred = s.fred;
+  const macroBlock = (mc || fred) ? `
+═══ MACRO CONTEXT (${mc?.source === 'yahoo' ? 'Yahoo Finance' : mc?.source === 'stooq' ? 'Stooq fallback' : '—'}${fred ? ' + FRED' : ''}) ═══
+• DXY: ${mc?.dxy?.close != null ? sf(mc.dxy.close, 2) + ' (' + (mc.dxy.changePct >= 0 ? '+' : '') + sf(mc.dxy.changePct, 2) + '%)' : 'N/A'}
+• Gold: ${mc?.gold?.close != null ? '$' + sf(mc.gold.close, 0) + ' (' + (mc.gold.changePct >= 0 ? '+' : '') + sf(mc.gold.changePct, 2) + '%)' : 'N/A'}
+• S&P 500: ${mc?.spx?.close != null ? sf(mc.spx.close, 0) + ' (' + (mc.spx.changePct >= 0 ? '+' : '') + sf(mc.spx.changePct, 2) + '%)' : 'N/A'}${fred?.vix ? `
+• VIX (FRED, ${fred.vix.date}): ${sf(fred.vix.value, 1)} ${fred.vix.value > 25 ? '(fear tinggi — risk-off)' : fred.vix.value < 15 ? '(komplasen)' : '(normal)'}` : ''}${fred?.us10y ? `
+• US 10Y yield (FRED, ${fred.us10y.date}): ${sf(fred.us10y.value, 2)}%` : ''}${fred?.dxyBroad ? `
+• DXY broad/resmi (FRED, ${fred.dxyBroad.date}): ${sf(fred.dxyBroad.value, 1)}` : ''}
+• Risk regime: ${mc?.riskRegime?.replace('_', ' ') ?? 'N/A'}` : '';
 
   // v5.3: Advanced metrics block (ATR, VWAP, volume, swing S/R)
   const adv = s.advanced || {};
@@ -348,18 +375,112 @@ PENTING untuk SL/TP: gunakan ATR sebagai basis. SL minimal 1.5× ATR dari entry,
   const cp   = s.cascadeProbability;
   const oe   = s.onChainExt;
 
+  // ── v8: KEBUTUHAN_SINYAL — positioning whale/institusi & sinyal komposit ──
+  const mr   = s.marketRegime;
+  const cv   = s.crossVenue;
+  const sq   = s.squeezeFuel;
+  const hl   = s.hyperliquid;
+  const bfx  = s.bitfinexMargin;
+  const cot  = s.cftcCot;
+  const dvol = s.dvol;
+  const cbp  = s.coinbasePremium;
+  const kim  = s.kimchiPremium;
+  const cmeG = s.cmeGap;
+  const nupl = s.nupl;
+  const miner = s.minerPressure;
+  const pm   = s.polymarket;
+  const aggL = s.aggregateLiquidations;
+
   // ── Smart Money Score block (sinyal agregat paling penting) ───────────────
   const smsBlock = sms ? `
-═══ SMART MONEY CONVICTION SCORE (v7 — agregat bandarmologi) ═══
+═══ SMART MONEY CONVICTION SCORE (v8 — agregat bandarmologi) ═══
 • Score: ${sms.score}/100 → arah ${sms.direction}, conviction ${sms.conviction}
   (${sms.score >= 70 ? '🟢 BULLISH KUAT — smart money mayoritas akumulasi' : sms.score >= 60 ? '🟡 BULLISH MODERAT' : sms.score <= 30 ? '🔴 BEARISH KUAT — smart money mayoritas distribusi' : sms.score <= 40 ? '🟠 BEARISH MODERAT' : '⚪ CONFLICTED — sinyal bertentangan, tunggu konfirmasi'})
 • Bull pts: ${sms.bullPts} | Bear pts: ${sms.bearPts} (dari total bobot ${sms.totalWeight})
 ${cp ? `• Cascade probability: ${cp.probability}% risiko — ${cp.riskLevel} — ${cp.note}` : ''}` : '';
 
+  // ── v8 §6.1: Market Regime — SIAPA yang menggerakkan harga ────────────────
+  const regimeBlock = mr ? `
+═══ MARKET REGIME — Price × OI × Funding (§6.1, KONTEKS UTAMA) ═══
+• Regime: ${mr.label} | digerakkan oleh: ${mr.drivenBy} | health score: ${mr.healthScore}/100
+• Input: Δprice 24h ${sf(mr.inputs.priceChange24h)}% · ΔOI 24h ${sf(mr.inputs.oiChange24h)}% · funding ${sf(mr.inputs.fundingPct, 4)}%
+• Artinya: ${mr.note}` : '';
+
+  // ── v8 §6.2: Cross-Venue Positioning Matrix ───────────────────────────────
+  const cvBlock = cv ? `
+═══ CROSS-VENUE POSITIONING MATRIX (§6.2 — confluence bandarmologi riil) ═══
+${cv.rows.map(r => `• ${r.venue} (${r.cohort}): ${r.bias} — ${r.detail}`).join('\n')}
+• VENUE AGREEMENT: ${cv.venueAgreement.verdict} (long ${cv.venueAgreement.long} / short ${cv.venueAgreement.short} / neutral ${cv.venueAgreement.neutral} dari ${cv.venueAgreement.total} venue) → confluence ${cv.confluence}
+• ATURAN: ≥4 venue searah + confluence STRONG → boleh HIGH confidence. SPLIT → paksa WAIT/LOW.` : '';
+
+  // ── v8 §6.3: Squeeze Fuel — "bearish" vs "jangan short, bahan squeeze" ────
+  const sqBlock = (sq && sq.direction !== 'NONE') ? `
+═══ SQUEEZE FUEL INDICATOR (§6.3) ═══
+• Arah: ${sq.direction} | score: ${sq.score}/100
+• Komponen: ${sq.components.join('; ')}
+• Artinya: ${sq.direction === 'SHORT_SQUEEZE' ? 'bahan bakar squeeze NAIK menumpuk — JANGAN SHORT sembarangan meski sinyal bearish' : 'bahan bakar squeeze TURUN menumpuk — JANGAN LONG sembarangan meski sinyal bullish'}` : '';
+
+  // ── v8 §3: Whale & institusi lintas venue (detail) ────────────────────────
+  const whaleLines = [];
+  if (hl) {
+    whaleLines.push(`• Hyperliquid (perp DEX whale): funding 8h-eq ${sf(hl.funding8hPct, 4)}% vs rata2 CEX ${hl.cexFundingAvg != null ? sf(hl.cexFundingAvg, 4) + '%' : '—'} → divergence ${hl.fundingDivergence != null ? sf(hl.fundingDivergence, 4) + '%' : '—'} (${hl.divergenceSignal || '—'}${hl.divergenceSignal === 'DEX_MORE_BULLISH' ? ' — whale DEX lebih bullish dari retail CEX, kontrarian' : hl.divergenceSignal === 'DEX_MORE_BEARISH' ? ' — whale DEX lebih bearish, hati-hati' : ''}) · OI $${hl.openInterestUsd ? (hl.openInterestUsd / 1e9).toFixed(2) + 'B' : '—'}`);
+  }
+  if (bfx) {
+    whaleLines.push(`• Bitfinex margin (whale legacy): long ${sf(bfx.longBtc, 0)} BTC (Δ24h ${bfx.longDelta24hPct != null ? sf(bfx.longDelta24hPct) + '%' : '—'}) vs short ${sf(bfx.shortBtc, 0)} BTC (Δ24h ${bfx.shortDelta24hPct != null ? sf(bfx.shortDelta24hPct) + '%' : '—'}) → ${bfx.signal}${bfx.signal === 'WHALE_LONG_BUILDUP' ? ' (whale akumulasi — bias LONG)' : bfx.signal === 'SHORT_BUILDUP' ? ' (short menumpuk — bahan squeeze naik)' : ''}`);
+  }
+  if (cot) {
+    whaleLines.push(`• CFTC COT CME (mingguan, report ${cot.reportDate || '—'}; SINYAL LAMBAT — bobot swing, bukan scalp):`);
+    whaleLines.push(`  - Hedge funds (lev money): net ${cot.leveragedFunds.net} kontrak (ΔWoW ${cot.leveragedFunds.netDeltaWoW ?? '—'}) → ${cot.levSignal}${cot.levSignal === 'HEDGE_FUNDS_COVERING' ? ' (short ditutup — bullish marginal)' : ''}`);
+    whaleLines.push(`  - Asset managers (institusi): net ${cot.assetManagers.net} kontrak (ΔWoW ${cot.assetManagers.netDeltaWoW ?? '—'}) → ${cot.amSignal}`);
+  }
+  if (aggL) {
+    whaleLines.push(`• Likuidasi agregat ${aggL.venues.join('+')}: long $${aggL.totalLongLiqM}M vs short $${aggL.totalShortLiqM}M → ${aggL.signal}${aggL.signal === 'CONFIRMED_LONG_WASHOUT' ? ' ⚡ washout 2 bursa serentak — reversal LONG lebih kuat!' : aggL.signal === 'CONFIRMED_SHORT_SQUEEZE' ? ' ⚡ squeeze 2 bursa serentak!' : ''}`);
+  }
+  const whaleBlock = whaleLines.length ? `
+═══ WHALE & INSTITUSI LINTAS VENUE (§3 — inti bandarmologi) ═══
+${whaleLines.join('\n')}` : '';
+
+  // ── v8 §4: Premium / arbitrase ────────────────────────────────────────────
+  const premLines = [];
+  if (cbp) {
+    premLines.push(`• Coinbase Premium (US): ${cbp.premiumPct >= 0 ? '+' : ''}${sf(cbp.premiumPct, 4)}% → ${cbp.signal}${cbp.signal === 'US_BUYING' ? ' (tekanan beli US — institusi/ETF, bias LONG)' : cbp.signal === 'US_SELLING' ? ' (diskon US — distribusi, bias SHORT)' : ''}`);
+  }
+  if (kim) {
+    premLines.push(`• Kimchi Premium (Asia): ${kim.premiumPct >= 0 ? '+' : ''}${sf(kim.premiumPct)}% → ${kim.signal}${kim.signal === 'ASIA_EUPHORIA' ? ' (euforia retail Asia >3% — historis dekat TOP lokal, kontrarian SHORT)' : kim.signal === 'ASIA_FEAR' ? ' (negatif — ketakutan/apatis, sering dekat bottom)' : ''}`);
+  }
+  if (cmeG?.level) {
+    premLines.push(`• CME Gap belum tertutup: $${cmeG.level.toLocaleString()} (${cmeG.direction === 'BELOW_PRICE' ? 'di BAWAH harga' : 'di ATAS harga'}, gap ${sf(cmeG.gapPct)}%, umur ${cmeG.ageDays} hari) → magnet harga, sangat sering di-fill — pakai sebagai level TP/SL tambahan`);
+  }
+  const premiumBlock = premLines.length ? `
+═══ PREMIUM & ARBITRASE (§4 — computed) ═══
+${premLines.join('\n')}` : '';
+
+  // ── v8 §3.4: DVOL — implied volatility ────────────────────────────────────
+  const dvolBlock = dvol ? `
+═══ IMPLIED VOLATILITY — Deribit DVOL (§3.4) ═══
+• DVOL: ${sf(dvol.current, 1)} (avg 7d ${sf(dvol.avg7d, 1)}, range ${sf(dvol.min7d, 1)}–${sf(dvol.max7d, 1)}, posisi ${dvol.positionPct}% dari range) → ${dvol.signal}
+${dvol.signal === 'VOL_COMPRESSED' ? '• Artinya: kompresi vol — market komplasen, BREAKOUT BESAR menunggu (arah ambil dari sinyal lain)' : dvol.signal === 'VOL_SPIKE' ? '• Artinya: vol spike — panik; jika harga turun bersamaan, sering dekat bottom lokal (kontrarian LONG)' : '• Artinya: volatilitas normal'}` : '';
+
+  // ── v8 §5: NUPL + miner + prediction market ───────────────────────────────
+  const extraOnchainLines = [];
+  if (nupl) {
+    extraOnchainLines.push(`• NUPL (bitcoin-data.com${nupl.cached ? ', cache <24h' : ''}, ${nupl.date || '—'}): ${sf(nupl.nupl, 3)} → ${nupl.signal}${nupl.signal === 'EUPHORIA' ? ' (>0.75 — euforia, bias distribusi/SHORT swing)' : nupl.signal === 'CAPITULATION' ? ' (<0 — kapitulasi, zona akumulasi/LONG swing)' : ''}`);
+  }
+  if (miner) {
+    extraOnchainLines.push(`• Miner pressure: hashrate ${sf(miner.hashFromPeak30dPct, 1)}% dari peak 30d, revenue ${miner.revFromPeak30dPct != null ? sf(miner.revFromPeak30dPct, 1) + '%' : '—'} → ${miner.signal}${miner.signal === 'MINER_STRESS' ? ' (tekanan jual miner — bias SHORT pelan)' : ''}`);
+  }
+  if (pm?.markets?.length) {
+    extraOnchainLines.push(`• Polymarket (prediction market, eksperimental — bobot kecil):`);
+    pm.markets.forEach(m => extraOnchainLines.push(`  - "${m.question}" → YES ${m.yesProbPct}%${m.volume24h ? ` (vol 24h $${m.volume24h.toLocaleString()})` : ''}`));
+  }
+  const extraOnchainBlock = extraOnchainLines.length ? `
+═══ ON-CHAIN CYCLE EXTRA & SENTIMEN PASAR BERDUIT (§5) ═══
+${extraOnchainLines.join('\n')}` : '';
+
   const instLines = [];
 
   if (etf) {
-    instLines.push(`• Bitcoin ETF net flow 24h: ${etf.netFlow24h >= 0 ? '+' : ''}$${(etf.netFlow24h / 1e6).toFixed(1)}M → ${etf.signal} ${etf.signal === 'INFLOW' ? '(institusi AKUMULASI — bullish kuat)' : etf.signal === 'OUTFLOW' ? '(institusi DISTRIBUSI — bearish)' : ''}`);
+    instLines.push(`• Bitcoin ETF net flow harian terakhir (${etf.lastDate || '—'}${etf.cached ? ', cache' : ''}): ${etf.netFlow24h >= 0 ? '+' : ''}$${(etf.netFlow24h / 1e6).toFixed(1)}M → ${etf.signal} ${etf.signal === 'INFLOW' ? '(institusi AKUMULASI — bullish kuat)' : etf.signal === 'OUTFLOW' ? '(institusi DISTRIBUSI — bearish)' : ''}${etf.flow5dSum != null ? ` · 5d sum ${etf.flow5dSum >= 0 ? '+' : ''}$${(etf.flow5dSum / 1e6).toFixed(0)}M` : ''}${etf.streak ? ` · streak ${etf.streak} hari ${etf.streakDirection}${etf.streakDirection === 'OUTFLOW' && etf.streak >= 3 ? ' ⚠ outflow ≥3 hari = bias SHORT institusi' : ''}` : ''}`);
   }
   if (sc) {
     instLines.push(`• Stablecoin supply: $${(sc.total / 1e9).toFixed(1)}B (7d ${sc.change7d >= 0 ? '+' : ''}${num(sc.change7d)}%) → ${sc.liquiditySignal} ${sc.liquiditySignal === 'EXPANDING' ? '(dry powder bertambah — amunisi beli)' : sc.liquiditySignal === 'CONTRACTING' ? '(likuiditas keluar)' : ''}`);
@@ -422,7 +543,7 @@ ${instLines.join('\n')}` : '';
 • 24h volume: ${big(s.ticker?.volume24h)}
 • BTC dominance: ${num(dominance)}%
 • Distance dari cycle high: ${num(athDist)}%${ms.cycleHigh ? ` (cycle high $${Number(ms.cycleHigh).toLocaleString(undefined,{maximumFractionDigits:0})})` : ''}
-${smsBlock}
+${smsBlock}${regimeBlock}${cvBlock}${sqBlock}
 ═══ ORDER BOOK (spot) ═══
 • Top bid walls: ${big(s.orderBook?.bidWall, 1e6, 'M')}
 • Top ask walls: ${big(s.orderBook?.askWall, 1e6, 'M')}
@@ -433,7 +554,7 @@ ${smsBlock}
 • Funding rate (perp): ${num(s.funding?.fundingRate, 4)}%  ${(s.funding?.fundingRate ?? 0) > 0.01 ? '(longs crowded — pay shorts)' : (s.funding?.fundingRate ?? 0) < -0.01 ? '(shorts crowded — pay longs)' : '(neutral)'}
 ${oiLine}
 ${lsLine}
-${tvLine}${institutionalBlock}${onChainExtBlock}
+${tvLine}${institutionalBlock}${whaleBlock}${premiumBlock}${dvolBlock}${onChainExtBlock}${extraOnchainBlock}
 
 ═══ TECHNICAL ANALYSIS (multi-timeframe, pre-computed) ═══
 ${fmtInd('h1', '1H')}
@@ -519,6 +640,26 @@ KAIDAH BACA DATA (gunakan untuk reasoning):
    - LIQUIDATION MAGNET (ESTIMASI KASAR ±2-5% dari level nyata): pakai ZONA bukan angka spesifik sebagai area waspada.
    - PRIORITAS: Smart Money Score + Bybit liquidation + ETF flow + CVD multi-exchange = confluence bandarmologi terkuat → boleh HIGH confidence.
    - ON-CHAIN EXTENDED (NVT, SOPR): NVT >150 = bubble zone (hati2 LONG). SOPR <1 = capitulation = zona beli fundamental terbaik.
+13. MARKET REGIME v8 (KONTEKS PALING PENTING — baca duluan):
+   - SPOT_LED_RALLY = rally paling sehat → LONG conviction tinggi. SHORT_COVERING = rally lemah, JANGAN kejar.
+   - LONG_LIQUIDATION/DELEVERAGING = tunggu washout selesai → setelahnya sering reversal LONG.
+   - Regime menjawab: harga naik karena spot buying sehat, atau leverage rapuh? Sesuaikan confidence.
+14. CROSS-VENUE MATRIX v8 (confluence bandarmologi sesungguhnya):
+   - ≥4 venue searah (Binance/OKX/Bitfinex/Hyperliquid/CME) + STRONG → boleh HIGH confidence ke arah itu.
+   - SPLIT → WAJIB WAIT atau LOW confidence, jangan paksa direction.
+   - COT CME = sinyal MINGGUAN (lambat) — bobot untuk swing/posisi, bukan timing scalp.
+   - Hyperliquid divergence: whale DEX beda arah dari retail CEX = sinyal kontrarian, beri perhatian.
+15. SQUEEZE FUEL v8: jika SHORT_SQUEEZE score tinggi → JANGAN SHORT meski bearish (bahan bakar naik menumpuk). LONG_SQUEEZE tinggi → jangan LONG agresif. Ini pembeda "bearish" vs "berbahaya untuk short".
+16. PREMIUM v8:
+   - Coinbase premium positif persisten = institusi US beli (bias LONG); diskon dalam = distribusi US.
+   - Kimchi premium >3% = euforia retail Asia → kontrarian SHORT dekat top; negatif = dekat bottom.
+   - CME gap belum tertutup = magnet harga yang sangat sering di-fill → masukkan ke pertimbangan TP/SL.
+17. VOLATILITAS & CYCLE v8:
+   - DVOL VOL_COMPRESSED = breakout besar menunggu — perketat entry, siapkan kedua skenario. VOL_SPIKE + harga turun = sering bottom lokal (kontrarian LONG).
+   - NUPL >0.75 = euphoria (distribusi/SHORT swing), <0 = capitulation (akumulasi/LONG swing).
+   - Miner MINER_STRESS = tekanan jual struktural pelan (bias bearish lemah).
+   - ETF outflow streak ≥3 hari = bias SHORT institusi; inflow >$100M/hari = bias LONG institusi.
+   - News votes CryptoPanic & Polymarket odds = konfirmasi sentimen, bobot kecil.
 
 ATURAN KETAT (PASTI DIPATUHI):
 • LONG → stopLoss < entryLow < entryHigh < takeProfit1 < takeProfit2
@@ -1072,10 +1213,30 @@ async function loadSnapshot() {
     const tid = setTimeout(() => ctrl.abort(), 28000);
     const headers = {};
     if (state.coinalyzeKey) headers['x-coinalyze-key'] = state.coinalyzeKey;
+    // v8: FREE KEY tambahan (BYOK via header, Edge fetch server-side)
+    const dk = state.dataKeys;
+    if (dk.fred)        headers['x-fred-key'] = dk.fred;
+    if (dk.cryptopanic) headers['x-cryptopanic-key'] = dk.cryptopanic;
+    // ETF (SoSoValue): data harian → kirim key hanya kalau cache stale > 4 jam
+    const cache = readSlowCache();
+    if (dk.soso && cacheStale(cache.etf, TTL_ETF_MS)) headers['x-soso-key'] = dk.soso;
+    // NUPL (bitcoin-data.com): rate limit 8 req/JAM → minta fetch hanya 1×/24 jam
+    if (cacheStale(cache.nupl, TTL_NUPL_MS)) {
+      headers['x-fetch-nupl'] = '1';
+      if (dk.btcdata) headers['x-btcdata-key'] = dk.btcdata;
+    }
     const r = await fetch('/api/snapshot', { signal: ctrl.signal, headers });
     clearTimeout(tid);
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    state.snapshot = await r.json();
+    const snap = await r.json();
+    // v8: merge cache ⇄ snapshot — simpan hasil baru, atau pakai cache saat
+    // server tidak fetch (TTL belum lewat) supaya sinyal tetap tampil
+    if (snap.etfFlows) cache.etf = { ts: Date.now(), data: snap.etfFlows };
+    else if (cache.etf?.data) snap.etfFlows = { ...cache.etf.data, cached: true };
+    if (snap.nupl) cache.nupl = { ts: Date.now(), data: snap.nupl };
+    else if (cache.nupl?.data) snap.nupl = { ...cache.nupl.data, cached: true };
+    writeSlowCache(cache);
+    state.snapshot = snap;
     state.lastFetch = Date.now();
   } catch (e) {
     state.error = e.name === 'AbortError' ? 'Timeout 28s saat fetch snapshot — cek koneksi' : e.message;
@@ -1344,6 +1505,26 @@ function clearCoinalyzeKey() {
   loadSnapshot();
 }
 
+// v8: simpan/hapus FREE KEY data source (soso | fred | cryptopanic | btcdata)
+function saveDataKey(name, val) {
+  if (!(name in state.dataKeys)) return;
+  state.dataKeys[name] = (val || '').trim();
+  try { localStorage.setItem(STORAGE_DATAKEYS, JSON.stringify(state.dataKeys)); } catch (_) {}
+  // Reset cache slow source terkait supaya key baru langsung dipakai
+  if (name === 'soso' || name === 'btcdata') {
+    const cache = readSlowCache();
+    if (name === 'soso') delete cache.etf;
+    if (name === 'btcdata') delete cache.nupl;
+    writeSlowCache(cache);
+  }
+  render();
+  loadSnapshot();
+}
+
+function clearDataKey(name) {
+  saveDataKey(name, '');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  (View functions di bawah — di file terpisah `view.js`)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1594,6 +1775,40 @@ function viewSettings() {
           </ol>
           <p class="text-[10px] text-zinc-600 pt-1">Tanpa key, estimasi level magnet likuidasi tetap muncul (dihitung lokal). Dengan key, dapat angka likuidasi nyata lintas bursa.</p>
         </div>
+      </div>
+    </div>
+
+    <!-- v8: FREE KEY data sources tambahan (semua opsional & gratis) -->
+    <div class="mt-6 pt-5 border-t border-zinc-800">
+      <label class="block text-[10px] uppercase tracking-[0.15em] text-zinc-500 mb-1">
+        Data Source Keys <span class="text-zinc-600 normal-case tracking-normal">(v8 — semua GRATIS &amp; opsional, daftar sendiri, key disimpan di browser)</span>
+      </label>
+      <p class="text-[11px] text-zinc-600 sans mb-3">Tanpa key ini dashboard tetap jalan penuh — key hanya menambah sinyal: ETF flow institusi (SoSoValue), VIX/yield makro (FRED), berita dengan voting bullish/bearish (CryptoPanic), NUPL on-chain (bitcoin-data.com).</p>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        ${[
+          { name: 'soso',        label: 'SoSoValue (ETF flows)',        url: 'https://sosovalue.com',                 urlLabel: 'sosovalue.com → API key',        hint: 'Net inflow/outflow harian ETF spot BTC — sinyal institusi terkuat' },
+          { name: 'fred',        label: 'FRED (makro resmi)',           url: 'https://fred.stlouisfed.org/docs/api/api_key.html', urlLabel: 'fred.stlouisfed.org', hint: 'VIX, 10Y yield, DXY broad — gratis permanen dari The Fed' },
+          { name: 'cryptopanic', label: 'CryptoPanic (news + votes)',   url: 'https://cryptopanic.com/developers/api/', urlLabel: 'cryptopanic.com/developers',   hint: 'Berita JSON + voting bullish/bearish per berita (ganti RSS)' },
+          { name: 'btcdata',     label: 'bitcoin-data.com (NUPL)',      url: 'https://bitcoin-data.com',              urlLabel: 'bitcoin-data.com',               hint: 'NUPL cycle-stage. Rate limit ketat → di-cache 24 jam otomatis' },
+        ].map(k => `<div class="border border-zinc-800 bg-zinc-950/60 p-3">
+          <div class="flex items-center justify-between gap-2 mb-1">
+            <span class="text-[11px] text-zinc-300 font-medium">${esc(k.label)}</span>
+            ${state.dataKeys[k.name]
+              ? '<span class="text-[9px] text-emerald-400">● configured</span>'
+              : '<span class="text-[9px] text-zinc-600">○ off</span>'}
+          </div>
+          <div class="text-[10px] text-zinc-600 sans mb-2">${esc(k.hint)} · <a href="${k.url}" target="_blank" rel="noopener" class="text-blue-400/80 hover:underline">${esc(k.urlLabel)}</a></div>
+          <div class="flex gap-2">
+            <input id="datakey-${k.name}" type="password" value="${esc(state.dataKeys[k.name])}"
+              placeholder="API key (opsional)"
+              class="flex-1 min-w-0 bg-black border border-zinc-700 px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500"
+              autocomplete="off" spellcheck="false" />
+            <button onclick="window._app.saveDataKey('${k.name}', document.getElementById('datakey-${k.name}').value)"
+              class="bg-zinc-700 hover:bg-zinc-600 text-zinc-100 px-3 py-1.5 text-[9px] uppercase tracking-[0.15em] font-medium transition-colors">Save</button>
+            ${state.dataKeys[k.name] ? `<button onclick="window._app.clearDataKey('${k.name}')"
+              class="border border-zinc-700 hover:border-red-500/50 px-2 py-1.5 text-[9px] uppercase tracking-wider text-red-400/80 transition-colors">✕</button>` : ''}
+          </div>
+        </div>`).join('')}
       </div>
     </div>
   </div>`;
@@ -2782,13 +2997,13 @@ function viewFlowCard(snap, analysis) {
 
   // Status sumber yang tidak tersedia (transparansi)
   const missing = [];
-  if (!etf) missing.push('ETF flow');
+  if (!etf) missing.push('ETF flow (perlu SoSoValue key gratis di Settings)');
   if (!cg) missing.push('Liquidation nyata (perlu Coinalyze key gratis)');
 
   return `<div class="col-span-12 border border-purple-500/40 bg-zinc-950 p-5">
     <div class="flex items-center justify-between mb-2">
       <div>
-        <span class="text-[10px] uppercase tracking-[0.15em] text-purple-300">Bandarmologi Dashboard · v7</span>
+        <span class="text-[10px] uppercase tracking-[0.15em] text-purple-300">Bandarmologi Dashboard · v8</span>
         <div class="text-xs text-zinc-500 sans mt-0.5">Smart Money Score + aliran duit institusi & posisi leverage lintas bursa</div>
       </div>
       <span class="text-[10px] text-zinc-600">${cards.length} indikator aktif</span>
@@ -2813,6 +3028,132 @@ function viewFlowCard(snap, analysis) {
       Jalankan AI Analysis untuk dapat kesimpulan gabungan dari semua indikator flow di atas.
     </div>`}
   </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  v8: Whale Positioning card — Regime Matrix + Cross-Venue + Squeeze Fuel +
+//  Hyperliquid/Bitfinex/COT + premium Coinbase/Kimchi/CME gap + DVOL + NUPL
+// ─────────────────────────────────────────────────────────────────────────────
+function viewPositioningCard(snap) {
+  const mr = snap?.marketRegime, cv = snap?.crossVenue, sq = snap?.squeezeFuel;
+  const hl = snap?.hyperliquid, bfx = snap?.bitfinexMargin, cot = snap?.cftcCot;
+  const dvol = snap?.dvol, cbp = snap?.coinbasePremium, kim = snap?.kimchiPremium;
+  const cmeG = snap?.cmeGap, nupl = snap?.nupl, miner = snap?.minerPressure;
+  if (!mr && !cv && !hl && !bfx && !cot && !dvol && !cbp) return '';
+
+  const biasColor = (b) => b === 'LONG' || b === 'bull' ? 'text-emerald-400'
+    : b === 'SHORT' || b === 'bear' ? 'text-red-400' : 'text-zinc-400';
+
+  const row = (label, value, sub, color = 'text-zinc-200') => `
+    <div class="border border-zinc-800 bg-zinc-950/40 p-3">
+      <div class="text-[9px] uppercase tracking-wider text-zinc-500 mb-1">${esc(label)}</div>
+      <div class="text-sm ${color} leading-snug">${value}</div>
+      ${sub ? `<div class="text-[10px] text-zinc-500 sans mt-1 leading-snug">${sub}</div>` : ''}
+    </div>`;
+
+  const cells = [];
+
+  if (mr) {
+    const hsColor = mr.healthScore >= 70 ? 'text-emerald-400' : mr.healthScore <= 35 ? 'text-red-400' : 'text-amber-400';
+    cells.push(row('Market Regime (Price×OI×Funding)',
+      `<span class="${hsColor}">${esc(mr.label.replace(/_/g, ' '))}</span> · health ${mr.healthScore}/100`,
+      esc(mr.note)));
+  }
+  if (cv) {
+    const va = cv.venueAgreement;
+    const venueRows = cv.rows.map(r =>
+      `<span class="text-zinc-500">${esc(r.venue)}:</span> <span class="${biasColor(r.bias)}">${esc(r.bias)}</span>`
+    ).join(' · ');
+    cells.push(row('Cross-Venue Agreement',
+      `<span class="${biasColor(cv.dominant)}">${esc(va.verdict)}</span> · confluence ${esc(cv.confluence)}`,
+      venueRows));
+  }
+  if (sq && sq.direction !== 'NONE') {
+    cells.push(row('Squeeze Fuel',
+      `<span class="${sq.direction === 'SHORT_SQUEEZE' ? 'text-emerald-400' : 'text-red-400'}">${esc(sq.direction.replace('_', ' '))}</span> · ${sq.score}/100`,
+      esc(sq.direction === 'SHORT_SQUEEZE' ? 'Bahan squeeze NAIK menumpuk — jangan short sembarangan' : 'Bahan squeeze TURUN menumpuk — jangan long agresif')));
+  }
+  if (hl) {
+    cells.push(row('Hyperliquid (whale DEX)',
+      `funding 8h-eq <span class="${hl.funding8hPct >= 0 ? 'text-emerald-400' : 'text-red-400'}">${hl.funding8hPct >= 0 ? '+' : ''}${hl.funding8hPct}%</span>${hl.divergenceSignal ? ` · ${esc(hl.divergenceSignal.replace(/_/g, ' '))}` : ''}`,
+      `vs CEX avg ${hl.cexFundingAvg != null ? hl.cexFundingAvg + '%' : '—'} · OI ${hl.openInterestUsd ? '$' + (hl.openInterestUsd / 1e9).toFixed(2) + 'B' : '—'}`));
+  }
+  if (bfx) {
+    cells.push(row('Bitfinex Margin (whale legacy)',
+      `<span class="${biasColor(bfx.signal === 'WHALE_LONG_BUILDUP' ? 'LONG' : bfx.signal === 'SHORT_BUILDUP' ? 'SHORT' : '')}">${esc(bfx.signal.replace(/_/g, ' '))}</span>`,
+      `long ${Math.round(bfx.longBtc).toLocaleString()} BTC (Δ24h ${bfx.longDelta24hPct ?? '—'}%) · short ${Math.round(bfx.shortBtc).toLocaleString()} BTC (Δ24h ${bfx.shortDelta24hPct ?? '—'}%)`));
+  }
+  if (cot) {
+    cells.push(row(`CFTC COT · CME (mingguan, ${esc(cot.reportDate || '—')})`,
+      `<span class="${biasColor(cot.amSignal === 'INSTITUSI_AKUMULASI' ? 'LONG' : cot.amSignal === 'INSTITUSI_DISTRIBUSI' ? 'SHORT' : '')}">${esc(cot.amSignal.replace(/_/g, ' '))}</span>`,
+      `asset mgr net ${cot.assetManagers.net} (ΔWoW ${cot.assetManagers.netDeltaWoW ?? '—'}) · hedge funds net ${cot.leveragedFunds.net} (ΔWoW ${cot.leveragedFunds.netDeltaWoW ?? '—'})`));
+  }
+  if (cbp) {
+    cells.push(row('Coinbase Premium (US)',
+      `<span class="${cbp.signal === 'US_BUYING' ? 'text-emerald-400' : cbp.signal === 'US_SELLING' ? 'text-red-400' : 'text-zinc-300'}">${cbp.premiumPct >= 0 ? '+' : ''}${cbp.premiumPct}%</span> · ${esc(cbp.signal.replace('_', ' '))}`,
+      'Premium positif persisten = tekanan beli institusi/ETF US'));
+  }
+  if (kim) {
+    cells.push(row('Kimchi Premium (Asia)',
+      `<span class="${kim.signal === 'ASIA_EUPHORIA' ? 'text-amber-400' : kim.signal === 'ASIA_FEAR' ? 'text-blue-400' : 'text-zinc-300'}">${kim.premiumPct >= 0 ? '+' : ''}${kim.premiumPct}%</span> · ${esc(kim.signal.replace('_', ' '))}`,
+      '>3% = euforia retail Asia (sering dekat top) · negatif = takut (dekat bottom)'));
+  }
+  if (cmeG?.level) {
+    cells.push(row('CME Gap (magnet)',
+      `$${cmeG.level.toLocaleString()} <span class="text-zinc-500">(${cmeG.direction === 'BELOW_PRICE' ? 'di bawah harga' : 'di atas harga'})</span>`,
+      `gap ${cmeG.gapPct}% · umur ${cmeG.ageDays} hari · sangat sering di-fill`));
+  }
+  if (dvol) {
+    cells.push(row('DVOL · Implied Volatility',
+      `${dvol.current} <span class="text-zinc-500">(${dvol.positionPct}% dari range 7d)</span> · <span class="${dvol.signal === 'VOL_SPIKE' ? 'text-amber-400' : dvol.signal === 'VOL_COMPRESSED' ? 'text-blue-400' : 'text-zinc-300'}">${esc(dvol.signal.replace(/_/g, ' '))}</span>`,
+      dvol.signal === 'VOL_COMPRESSED' ? 'Kompresi vol — breakout besar menunggu' : dvol.signal === 'VOL_SPIKE' ? 'Vol spike/panik — sering dekat bottom lokal' : 'Volatilitas normal'));
+  }
+  if (nupl) {
+    cells.push(row(`NUPL on-chain${nupl.cached ? ' (cache)' : ''}`,
+      `${nupl.nupl} · <span class="${nupl.signal === 'EUPHORIA' ? 'text-red-400' : nupl.signal === 'CAPITULATION' ? 'text-emerald-400' : 'text-zinc-300'}">${esc(nupl.signal.replace(/_/g, ' '))}</span>`,
+      '>0.75 euphoria (distribusi) · <0 capitulation (akumulasi)'));
+  }
+  if (miner) {
+    cells.push(row('Miner Pressure',
+      `<span class="${miner.signal === 'MINER_STRESS' ? 'text-red-400' : 'text-zinc-300'}">${esc(miner.signal.replace(/_/g, ' '))}</span>`,
+      `hashrate ${miner.hashFromPeak30dPct}% dari peak 30d · revenue ${miner.revFromPeak30dPct ?? '—'}%`));
+  }
+
+  return `<div class="col-span-12 border border-cyan-500/40 bg-zinc-950 p-5">
+    <div class="flex items-center justify-between mb-2">
+      <div>
+        <span class="text-[10px] uppercase tracking-[0.15em] text-cyan-300">Whale Positioning · v8</span>
+        <div class="text-xs text-zinc-500 sans mt-0.5">Regime matrix, cross-venue confluence, dan posisi uang besar (CME · Hyperliquid · Bitfinex · premium US/Asia)</div>
+      </div>
+      <span class="text-[10px] text-zinc-600">${cells.length} sinyal aktif</span>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">${cells.join('')}</div>
+  </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  v8: Source Health panel — endpoint mati harus KETAHUAN, tidak senyap
+//  (pelajaran kasus ETF DefiLlama yang dead-code tanpa ada yang sadar)
+// ─────────────────────────────────────────────────────────────────────────────
+function viewSourceHealth(snap) {
+  const health = snap?.sourceHealth;
+  if (!Array.isArray(health) || !health.length) return '';
+  const ok = health.filter(h => h.ok);
+  const needKey = health.filter(h => !h.ok && h.needsKey);
+  const dead = health.filter(h => !h.ok && !h.needsKey);
+  const chip = (h, color) =>
+    `<span class="inline-block px-1.5 py-0.5 border ${color} text-[9px] tracking-wide">${esc(h.source)}</span>`;
+  return `<details class="mb-4 border border-zinc-800/60 bg-zinc-950/50">
+    <summary class="cursor-pointer px-4 py-2 text-[10px] uppercase tracking-[0.15em] text-zinc-500 hover:text-zinc-300 select-none">
+      Source Health — ${ok.length}/${health.length} hidup${dead.length ? ` · <span class="text-red-400">${dead.length} mati</span>` : ''}${needKey.length ? ` · ${needKey.length} butuh key` : ''}
+    </summary>
+    <div class="px-4 pb-3 space-y-2">
+      <div class="flex flex-wrap gap-1">${ok.map(h => chip(h, 'border-emerald-500/30 text-emerald-400/80')).join('')}</div>
+      ${dead.length ? `<div class="flex flex-wrap gap-1 items-center"><span class="text-[9px] text-red-400/80 uppercase mr-1">null/mati:</span>${dead.map(h => chip(h, 'border-red-500/40 text-red-400')).join('')}</div>` : ''}
+      ${needKey.length ? `<div class="flex flex-wrap gap-1 items-center"><span class="text-[9px] text-zinc-500 uppercase mr-1">butuh free key (Settings):</span>${needKey.map(h => chip(h, 'border-zinc-700 text-zinc-500')).join('')}</div>` : ''}
+      <div class="text-[10px] text-zinc-600 sans">Sumber yang terus-menerus "mati" berarti endpoint berubah/diblokir — laporkan/perbaiki, jangan dibiarkan senyap.</div>
+    </div>
+  </details>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3062,7 +3403,7 @@ function render() {
         <span class="text-blue-400 text-lg">🔍</span>
         <span class="text-sm text-blue-300 uppercase tracking-[0.15em]">Fetching live snapshot</span>
       </div>
-      <div class="text-sm text-zinc-400 sans">Mengambil tick dari Binance, CoinGecko, mempool.space, alternative.me, blockchain.info, CryptoCompare...</div>
+      <div class="text-sm text-zinc-400 sans">Mengambil tick dari Binance, Bybit, OKX, Hyperliquid, Bitfinex, CME/CFTC, Deribit, Coinbase, Upbit, mempool.space, alternative.me...</div>
       <div class="h-1 bg-zinc-900 max-w-md mx-auto overflow-hidden mt-6">
         <div class="h-full shimmer"></div>
       </div>
@@ -3120,6 +3461,11 @@ function render() {
         ${viewFlowCard(snapshot, analysis)}
       </div>
 
+      <!-- v8: Whale Positioning (regime, cross-venue, COT, Hyperliquid, premium) -->
+      <div class="grid grid-cols-12 gap-3 mb-3">
+        ${viewPositioningCard(snapshot)}
+      </div>
+
       <!-- v3: Technical Analysis multi-TF -->
       <div class="grid grid-cols-12 gap-3 mb-3">
         ${viewTechnicalCard(snapshot, analysis)}
@@ -3168,8 +3514,10 @@ function render() {
         ℹ ${snapshot.degraded.length} sumber opsional tidak tersedia (${esc(snapshot.degraded.map(e => e.source).join(', '))}) — data inti tetap lengkap, tidak memengaruhi analisis
       </div>` : ''}
 
+      ${viewSourceHealth(snapshot)}
+
       <footer class="border-t border-zinc-800 pt-4 flex items-center justify-between text-[10px] text-zinc-600 sans gap-4 flex-wrap">
-        <div>Data inti: Binance (harga, klines, derivatives, ATR/VWAP/volume/swing) · opsional: CoinGecko, Deribit, CoinMetrics, Stooq</div>
+        <div>Data inti: Binance · positioning: CME COT, Hyperliquid, Bitfinex, OKX, Bybit, Coinbase, Upbit, Deribit · makro: Yahoo/FRED · on-chain: CoinMetrics, bitcoin-data</div>
         <div>Bukan saran finansial · DYOR</div>
       </footer>
     `;
@@ -3240,6 +3588,8 @@ window._app = {
   setMode,
   saveCoinalyzeKey,
   clearCoinalyzeKey,
+  saveDataKey,
+  clearDataKey,
   toggleDebate,
 };
 
