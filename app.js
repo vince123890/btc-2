@@ -332,14 +332,32 @@ PENTING untuk SL/TP: gunakan ATR sebagai basis. SL minimal 1.5× ATR dari entry,
   const dominance = ms.btcDominance ?? s.global?.btcDominance;
 
   // ── v6: Institutional & cross-exchange flow ──────────────────────────────
-  const etf = s.etfFlows;
-  const sc = s.stablecoins;
-  const cvd = s.cvd;
+  const etf  = s.etfFlows;
+  const sc   = s.stablecoins;
+  const cvd  = s.cvd;
   const basis = s.basis;
-  const mf = s.multiFunding;
-  const cg = s.coinalyze;
+  const mf   = s.multiFunding;
+  const cg   = s.coinalyze;
+
+  // ── v7: Bandarmologi lanjutan ─────────────────────────────────────────────
+  const sms  = s.smartMoneyScore;
+  const bbl  = s.bybitLiquidations;
+  const okxF = s.okxFlow;
+  const fb   = s.futuresBasis;
+  const fd   = s.fundingDivergence;
+  const cp   = s.cascadeProbability;
+  const oe   = s.onChainExt;
+
+  // ── Smart Money Score block (sinyal agregat paling penting) ───────────────
+  const smsBlock = sms ? `
+═══ SMART MONEY CONVICTION SCORE (v7 — agregat bandarmologi) ═══
+• Score: ${sms.score}/100 → arah ${sms.direction}, conviction ${sms.conviction}
+  (${sms.score >= 70 ? '🟢 BULLISH KUAT — smart money mayoritas akumulasi' : sms.score >= 60 ? '🟡 BULLISH MODERAT' : sms.score <= 30 ? '🔴 BEARISH KUAT — smart money mayoritas distribusi' : sms.score <= 40 ? '🟠 BEARISH MODERAT' : '⚪ CONFLICTED — sinyal bertentangan, tunggu konfirmasi'})
+• Bull pts: ${sms.bullPts} | Bear pts: ${sms.bearPts} (dari total bobot ${sms.totalWeight})
+${cp ? `• Cascade probability: ${cp.probability}% risiko — ${cp.riskLevel} — ${cp.note}` : ''}` : '';
 
   const instLines = [];
+
   if (etf) {
     instLines.push(`• Bitcoin ETF net flow 24h: ${etf.netFlow24h >= 0 ? '+' : ''}$${(etf.netFlow24h / 1e6).toFixed(1)}M → ${etf.signal} ${etf.signal === 'INFLOW' ? '(institusi AKUMULASI — bullish kuat)' : etf.signal === 'OUTFLOW' ? '(institusi DISTRIBUSI — bearish)' : ''}`);
   }
@@ -347,16 +365,31 @@ PENTING untuk SL/TP: gunakan ATR sebagai basis. SL minimal 1.5× ATR dari entry,
     instLines.push(`• Stablecoin supply: $${(sc.total / 1e9).toFixed(1)}B (7d ${sc.change7d >= 0 ? '+' : ''}${num(sc.change7d)}%) → ${sc.liquiditySignal} ${sc.liquiditySignal === 'EXPANDING' ? '(dry powder bertambah — amunisi beli)' : sc.liquiditySignal === 'CONTRACTING' ? '(likuiditas keluar)' : ''}`);
   }
   if (cvd) {
-    instLines.push(`• CVD (order flow 1000 trade terakhir): delta ${cvd.deltaPct >= 0 ? '+' : ''}${num(cvd.deltaPct)}% → ${cvd.signal} ${cvd.signal.includes('BUY') ? '(agresor beli dominan)' : cvd.signal.includes('SELL') ? '(agresor jual dominan)' : ''}`);
+    instLines.push(`• CVD Binance Futures (1000 trade terakhir): delta ${cvd.deltaPct >= 0 ? '+' : ''}${num(cvd.deltaPct)}% → ${cvd.signal} ${cvd.signal.includes('BUY') ? '(agresor beli dominan)' : cvd.signal.includes('SELL') ? '(agresor jual dominan)' : ''}`);
+  }
+  if (okxF) {
+    instLines.push(`• OKX top trader L/S: ratio ${num(okxF.longShortRatio, 4)} → ${okxF.bias} (trend: ${okxF.trend}) ${okxF.bias === 'LONG_DOMINANT' ? '(smart money OKX net long)' : okxF.bias === 'SHORT_DOMINANT' ? '(smart money OKX net short)' : ''}`);
+  }
+  if (bbl) {
+    const washoutTag = bbl.washoutSignal !== 'NONE'
+      ? ` ⚡ ${bbl.washoutSignal === 'LONG_WASHOUT' ? 'LONG WASHOUT — kapitulasi, contrarian bullish!' : 'SHORT SQUEEZE — sedang berlangsung!'}`
+      : '';
+    instLines.push(`• Bybit liquidations: long liq ${num(bbl.longLiqValueM)}M$ (${bbl.longLiqCount} events) vs short liq ${num(bbl.shortLiqValueM)}M$ (${bbl.shortLiqCount} events) → ${bbl.momentum}${washoutTag}`);
+  }
+  if (fb) {
+    instLines.push(`• Futures basis (mark vs index): ${fb.basisPct >= 0 ? '+' : ''}${num(fb.basisPct, 4)}% (≈${num(fb.annualizedPct, 1)}% annualized) → ${fb.regime} ${fb.regime.includes('CONTANGO') ? '(long premium — bullish bias)' : fb.regime.includes('BACKWARDATION') ? '(discount — bearish/panic)' : ''}`);
   }
   if (basis) {
-    instLines.push(`• Spot-Perp basis: ${basis.basisPct >= 0 ? '+' : ''}${num(basis.basisPct, 3)}% → ${basis.signal} ${basis.signal === 'PERP_PREMIUM' ? '(perp di atas spot — long leverage crowded, risiko long squeeze)' : basis.signal === 'PERP_DISCOUNT' ? '(perp di bawah spot — bearish/hedging)' : ''}`);
+    instLines.push(`• Spot-Perp basis (spot vs mark): ${basis.basisPct >= 0 ? '+' : ''}${num(basis.basisPct, 3)}% → ${basis.signal} ${basis.signal === 'PERP_PREMIUM' ? '(perp di atas spot — long crowded)' : basis.signal === 'PERP_DISCOUNT' ? '(perp di bawah spot — bearish/hedging)' : ''}`);
+  }
+  if (fd) {
+    instLines.push(`• Funding divergence score: ${num(fd.score, 3)} → consensus ${fd.consensus} — ${fd.interpretation}`);
   }
   if (mf) {
     const parts = [];
     if (mf.bybit != null) parts.push(`Bybit ${num(mf.bybit, 4)}%`);
-    if (mf.okx != null) parts.push(`OKX ${num(mf.okx, 4)}%`);
-    if (parts.length) instLines.push(`• Funding lintas bursa: ${parts.join(' · ')} (bandingkan dgn Binance ${num(s.funding?.fundingRate, 4)}%)`);
+    if (mf.okx   != null) parts.push(`OKX ${num(mf.okx, 4)}%`);
+    if (parts.length) instLines.push(`• Funding lintas bursa: Binance ${num(s.funding?.fundingRate, 4)}% · ${parts.join(' · ')}`);
   }
   if (cg) {
     const cgParts = [];
@@ -367,13 +400,19 @@ PENTING untuk SL/TP: gunakan ATR sebagai basis. SL minimal 1.5× ATR dari entry,
   // Liquidation magnet levels (computed) — selalu ada
   const lm = s.liqMagnets;
   if (lm) {
-    instLines.push(`• Liquidation MAGNET [ESTIMASI KASAR ±2-5%, bukan level exact — gunakan hanya sebagai zona, bukan angka pasti]:`);
-    instLines.push(`  - Zona magnet BAWAH (long liq, cascade turun): $${lm.downMagnet.from.toLocaleString()}–$${lm.downMagnet.to.toLocaleString()} | est. 25x $${lm.longLiqs[2].price.toLocaleString()}, 50x $${lm.longLiqs[1].price.toLocaleString()}`);
-    instLines.push(`  - Zona magnet ATAS (short liq, cascade naik/squeeze): $${lm.upMagnet.from.toLocaleString()}–$${lm.upMagnet.to.toLocaleString()} | est. 25x $${lm.shortLiqs[2].price.toLocaleString()}, 50x $${lm.shortLiqs[1].price.toLocaleString()}`);
+    instLines.push(`• Liquidation MAGNET [ESTIMASI KASAR ±2-5%]:`);
+    instLines.push(`  - Zona BAWAH (long liq): $${lm.downMagnet.from.toLocaleString()}–$${lm.downMagnet.to.toLocaleString()} | est. 25x $${lm.longLiqs[2].price.toLocaleString()}, 50x $${lm.longLiqs[1].price.toLocaleString()}`);
+    instLines.push(`  - Zona ATAS (short liq/squeeze): $${lm.upMagnet.from.toLocaleString()}–$${lm.upMagnet.to.toLocaleString()} | est. 25x $${lm.shortLiqs[2].price.toLocaleString()}, 50x $${lm.shortLiqs[1].price.toLocaleString()}`);
   }
   const institutionalBlock = instLines.length ? `
-═══ INSTITUTIONAL & CROSS-EXCHANGE FLOW (v6 — bandarmologi inti) ═══
+═══ INSTITUTIONAL & CROSS-EXCHANGE FLOW (v7 — bandarmologi inti) ═══
 ${instLines.join('\n')}` : '';
+
+  // ── v7: On-chain extended (NVT, SOPR) ────────────────────────────────────
+  const onChainExtBlock = oe ? `
+═══ ON-CHAIN EXTENDED (CoinMetrics Community) ═══
+• NVT Signal (90d): ${oe.nvt != null ? num(oe.nvt, 1) + ' → ' + (oe.nvtSignal || 'N/A') : 'N/A'} ${oe.nvtSignal === 'BUBBLE_ZONE' ? '(valuasi gelembung, hati-hati)' : oe.nvtSignal === 'UNDERVALUED' ? '(undervalued, zona beli fundamental)' : ''}
+• SOPR (Spent Output): ${oe.sopr != null ? num(oe.sopr, 4) + ' → ' + (oe.soprSignal || 'N/A') : 'N/A'} ${oe.soprSignal === 'PROFIT_TAKING' ? '(holder jual untung — distribusi)' : oe.soprSignal === 'CAPITULATION' ? '(holder jual rugi — zona akumulasi!)' : ''}` : '';
 
   return `═══ HARGA & MARKET ═══
 • BTC/USDT spot: $${num(s.ticker?.price, 2)}
@@ -383,7 +422,7 @@ ${instLines.join('\n')}` : '';
 • 24h volume: ${big(s.ticker?.volume24h)}
 • BTC dominance: ${num(dominance)}%
 • Distance dari cycle high: ${num(athDist)}%${ms.cycleHigh ? ` (cycle high $${Number(ms.cycleHigh).toLocaleString(undefined,{maximumFractionDigits:0})})` : ''}
-
+${smsBlock}
 ═══ ORDER BOOK (spot) ═══
 • Top bid walls: ${big(s.orderBook?.bidWall, 1e6, 'M')}
 • Top ask walls: ${big(s.orderBook?.askWall, 1e6, 'M')}
@@ -394,7 +433,7 @@ ${instLines.join('\n')}` : '';
 • Funding rate (perp): ${num(s.funding?.fundingRate, 4)}%  ${(s.funding?.fundingRate ?? 0) > 0.01 ? '(longs crowded — pay shorts)' : (s.funding?.fundingRate ?? 0) < -0.01 ? '(shorts crowded — pay longs)' : '(neutral)'}
 ${oiLine}
 ${lsLine}
-${tvLine}${institutionalBlock}
+${tvLine}${institutionalBlock}${onChainExtBlock}
 
 ═══ TECHNICAL ANALYSIS (multi-timeframe, pre-computed) ═══
 ${fmtInd('h1', '1H')}
@@ -465,15 +504,21 @@ KAIDAH BACA DATA (gunakan untuk reasoning):
    - VWAP = level institusi. Harga di atas VWAP = bias bullish, di bawah = bearish. Entry LONG lebih bagus dekat/di atas VWAP.
    - Volume RISING konfirmasi move; volume FALLING saat harga naik = momentum melemah (waspada). Volume SPIKE = sering titik reversal/exhaustion.
    - Swing S/R = level riil dari price action. Pakai swing support sebagai basis SL untuk LONG, swing resistance sebagai TP. Lebih akurat dari order book walls.
-12. INSTITUTIONAL & CROSS-EXCHANGE FLOW (v6 — sinyal bandarmologi PALING KUAT):
+12. BANDARMOLOGI v7 — SMART MONEY SIGNALS (PRIORITAS TERTINGGI):
+   - SMART MONEY SCORE (0-100): angka agregat dari semua sinyal bandarmologi. Score >70 = mayoritas sinyal akumulasi → LONG. Score <30 = distribusi → SHORT. Score 40-60 = CONFLICTED → WAIT atau posisi kecil.
+   - CASCADE PROBABILITY: jika >65% → HINDARI ENTRY, risiko cascade tinggi. Jika <35% → kondisi aman untuk posisi.
+   - Bybit Liquidations: LONG_WASHOUT = kapitulasi masif, contrarian BULLISH — bottom lokal lebih mungkin. SHORT_SQUEEZE = short cover massal, harga terpaksa naik. Gunakan sebagai timing entry.
+   - OKX Top Trader L/S: konfirmasi independen dari Binance. Jika Binance smart money bullish + OKX bullish = double confirmation LONG.
+   - Futures Basis (mark vs index): CONTANGO_BULLISH = pasar bullish tapi waspadai crowding. BACKWARDATION_BEARISH = panik/panic — kontrarian bullish jangka pendek.
+   - Funding Divergence Score: WEAK consensus (>1.0) → sinyal funding tidak reliable, jangan terlalu percaya. STRONG consensus (<0.3) → arah funding riil.
    - ETF net INFLOW = institusi akumulasi langsung (bullish confirm terkuat). OUTFLOW = distribusi institusi (bearish). Ini bobot tinggi — duit institusi riil.
    - Stablecoin supply EXPANDING = dry powder bertambah, amunisi beli menunggu (bullish lingkungan). CONTRACTING = likuiditas keluar (bearish).
-   - CVD positif (agresor beli) konfirmasi demand riil; CVD negatif = distribusi. Cocokkan dengan arah harga.
+   - CVD Binance Futures positif (agresor beli) konfirmasi demand riil; CVD negatif = distribusi. Cocokkan dengan OKX flow.
    - Spot-Perp basis: PERP_PREMIUM tinggi = long leverage crowded → rentan long squeeze (hati2 LONG). PERP_DISCOUNT = bearish tapi bisa jadi setup reversal.
    - Funding lintas bursa: kalau SEMUA bursa funding tinggi positif = long sangat crowded (mean reversion turun lebih mungkin).
-   - Coinalyze liquidation: LONGS_REKT = banyak long terlikuidasi (kapitulasi, bisa jadi bottom lokal); SHORTS_REKT = short squeeze (bisa jadi top lokal). Liquidation bias menunjukkan sisi mana yang "dihukum" pasar.
-   - LIQUIDATION MAGNET (ESTIMASI KASAR ±2-5% dari level nyata): harga sering "diburu" menuju zona magnet karena likuidasi memicu cascade. Kalau ada zona magnet besar dekat di atas → harga cenderung tertarik naik (hunt short liq); dekat di bawah → tertarik turun (hunt long liq). Pakai ZONA (bukan angka spesifik) sebagai area waspada, bukan SL/TP exact.
-   - PRIORITAS: kalau ETF flow + CVD + smart money L/S semua searah, itu confluence bandarmologi terkuat → boleh HIGH confidence.
+   - LIQUIDATION MAGNET (ESTIMASI KASAR ±2-5% dari level nyata): pakai ZONA bukan angka spesifik sebagai area waspada.
+   - PRIORITAS: Smart Money Score + Bybit liquidation + ETF flow + CVD multi-exchange = confluence bandarmologi terkuat → boleh HIGH confidence.
+   - ON-CHAIN EXTENDED (NVT, SOPR): NVT >150 = bubble zone (hati2 LONG). SOPR <1 = capitulation = zona beli fundamental terbaik.
 
 ATURAN KETAT (PASTI DIPATUHI):
 • LONG → stopLoss < entryLow < entryHigh < takeProfit1 < takeProfit2
@@ -489,7 +534,7 @@ ATURAN KETAT (PASTI DIPATUHI):
 • optionsView: 1-2 kalimat — apa kata PCR + max pain (kosongkan kalau data N/A)
 • onChainView: 1-2 kalimat — apa kata MVRV cycle context (kosongkan kalau data N/A)
 • macroView: 1-2 kalimat — apa kata DXY/Gold/SPX (kosongkan kalau data N/A)
-• flowView: 1-2 kalimat — apa kata ETF flow + stablecoin + CVD + basis + liquidation (kosongkan kalau semua N/A)
+• flowView: 1-2 kalimat — apa kata Smart Money Score + ETF flow + CVD + Bybit liq + OKX flow + basis (kosongkan kalau semua N/A)
 • cycleStage: klasifikasi fase pasar saat ini — ACCUMULATION (low MVRV, sideways), MARKUP (rising MVRV, bullish trend), DISTRIBUTION (high MVRV, sideways/topping), MARKDOWN (falling, decreasing MVRV), atau UNCLEAR
 • timeframeAlignment: harus konsisten dengan data multi-TF di atas
 • HIGH confidence hanya jika MIN 2 TF aligned + derivatives confirm + macro tidak lawan arah
@@ -2339,6 +2384,64 @@ function viewOnChainCard(snap, analysis) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  v7: On-Chain Extended card (NVT, SOPR)
+// ─────────────────────────────────────────────────────────────────────────────
+function viewOnChainExtCard(snap) {
+  const oe = snap?.onChainExt;
+  if (!oe) return '';
+
+  const nvtCfg = {
+    BUBBLE_ZONE:  { c: 'text-red-400',     bg: 'bg-red-500/10',     label: 'BUBBLE ZONE',  icon: '⚠' },
+    OVERVALUED:   { c: 'text-orange-400',  bg: 'bg-orange-500/5',   label: 'OVERVALUED',   icon: '⬆' },
+    FAIR_VALUE:   { c: 'text-blue-400',    bg: 'bg-blue-500/5',     label: 'FAIR VALUE',   icon: '◆' },
+    UNDERVALUED:  { c: 'text-emerald-400', bg: 'bg-emerald-500/5',  label: 'UNDERVALUED',  icon: '⬇' },
+  };
+  const soprCfg = {
+    PROFIT_TAKING: { c: 'text-orange-400', label: 'PROFIT TAKING',  hint: 'holder jual untung — distribusi, hati-hati' },
+    SLIGHT_PROFIT: { c: 'text-blue-400',   label: 'SLIGHT PROFIT',  hint: 'holder sedikit untung — normal bull' },
+    SLIGHT_LOSS:   { c: 'text-amber-400',  label: 'SLIGHT LOSS',    hint: 'holder sedikit rugi — waspada' },
+    CAPITULATION:  { c: 'text-emerald-400', label: 'CAPITULATION',  hint: 'holder jual rugi — bottom signal, zona beli!' },
+  };
+
+  const nvt = nvtCfg[oe.nvtSignal] || { c: 'text-zinc-400', bg: 'bg-zinc-800/30', label: oe.nvtSignal || '—', icon: '◆' };
+  const sopr = soprCfg[oe.soprSignal] || { c: 'text-zinc-400', label: oe.soprSignal || '—', hint: '' };
+
+  return `<div class="col-span-12 md:col-span-6 border border-blue-500/20 bg-zinc-950 p-5">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <span class="text-[10px] uppercase tracking-[0.15em] text-blue-300">On-Chain Extended · v7</span>
+        <div class="text-xs text-zinc-500 sans mt-0.5">CoinMetrics Community · NVT Signal + SOPR</div>
+      </div>
+      <span class="text-[10px] text-zinc-600">daily</span>
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 mb-3">
+      <div class="border border-zinc-800 ${nvt.bg || 'bg-zinc-950/40'} p-3">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] uppercase tracking-wider text-zinc-500">NVT Signal (90d)</span>
+          <span class="text-[9px] ${nvt.c}">${nvt.icon || ''} ${nvt.label}</span>
+        </div>
+        <div class="text-2xl tabular-nums text-zinc-100">${oe.nvt != null ? oe.nvt.toFixed(1) : '—'}</div>
+        <div class="text-[9px] text-zinc-600 mt-1">{'<'}45 undervalued · {'>'}90 fair · {'>'}150 bubble</div>
+      </div>
+
+      <div class="border border-zinc-800 bg-zinc-950/40 p-3">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] uppercase tracking-wider text-zinc-500">SOPR</span>
+          <span class="text-[9px] ${sopr.c}">${sopr.label}</span>
+        </div>
+        <div class="text-2xl tabular-nums text-zinc-100">${oe.sopr != null ? oe.sopr.toFixed(4) : '—'}</div>
+        <div class="text-[9px] text-zinc-600 mt-1">{'>'}1 holder jual untung · {'<'}1 jual rugi</div>
+      </div>
+    </div>
+
+    <div class="text-[10px] text-zinc-500 sans border-t border-zinc-800/60 pt-2">
+      ${oe.soprSignal ? `<span class="${sopr.c}">${sopr.hint}</span>` : 'Data NVT & SOPR dari CoinMetrics Community (gratis, update harian)'}
+    </div>
+  </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  v4: Macro Context card (DXY + Gold + SPX)
 // ─────────────────────────────────────────────────────────────────────────────
 function viewMacroCard(snap, analysis) {
@@ -2404,13 +2507,22 @@ function viewMacroCard(snap, analysis) {
 //  v6: Institutional & Cross-Exchange Flow card
 // ─────────────────────────────────────────────────────────────────────────────
 function viewFlowCard(snap, analysis) {
-  const etf = snap?.etfFlows;
-  const sc = snap?.stablecoins;
-  const cvd = snap?.cvd;
+  const etf  = snap?.etfFlows;
+  const sc   = snap?.stablecoins;
+  const cvd  = snap?.cvd;
   const basis = snap?.basis;
-  const mf = snap?.multiFunding;
-  const cg = snap?.coinalyze;
-  if (!etf && !sc && !cvd && !basis && !mf && !cg) return '';
+  const mf   = snap?.multiFunding;
+  const cg   = snap?.coinalyze;
+  // v7 signals
+  const sms  = snap?.smartMoneyScore;
+  const bbl  = snap?.bybitLiquidations;
+  const okxF = snap?.okxFlow;
+  const fb   = snap?.futuresBasis;
+  const fd   = snap?.fundingDivergence;
+  const cp   = snap?.cascadeProbability;
+  if (!etf && !sc && !cvd && !basis && !mf && !cg && !sms && !bbl && !okxF && !fb) return '';
+
+  const num = (v, d = 2) => v == null ? '—' : Number(v).toFixed(d);
 
   // Helper: kartu kaya yang menjelaskan diri sendiri
   // bias: 'bull' | 'bear' | 'neutral' | 'warn'
@@ -2434,6 +2546,113 @@ function viewFlowCard(snap, analysis) {
   };
 
   const cards = [];
+
+  // ── v7: Smart Money Conviction Score (sinyal agregat — tampil pertama) ────
+  if (sms) {
+    const scoreDir = sms.score >= 60 ? 'bull' : sms.score <= 40 ? 'bear' : 'neutral';
+    const scoreLabel = sms.score >= 70 ? 'VERY BULLISH' : sms.score >= 60 ? 'BULLISH' : sms.score <= 30 ? 'VERY BEARISH' : sms.score <= 40 ? 'BEARISH' : 'CONFLICTED';
+    const meaning = sms.score >= 70 ? 'Mayoritas sinyal bandarmologi menunjukkan akumulasi smart money. Konteks paling bullish untuk entry LONG.'
+      : sms.score >= 60 ? 'Lebih banyak sinyal bullish dari bearish. Support untuk posisi LONG dengan manajemen risiko.'
+      : sms.score <= 30 ? 'Mayoritas sinyal menunjukkan distribusi/pelarian smart money. Kondisi paling bearish.'
+      : sms.score <= 40 ? 'Sinyal bearish lebih dominan. Waspada untuk LONG, dukung SHORT atau wait.'
+      : 'Sinyal bertentangan — smart money belum menunjukkan arah jelas. Tunggu konfirmasi sebelum entry.';
+    cards.unshift(richCard({
+      label: 'Smart Money Score', star: true,
+      whatIs: 'Skor agregat 0–100 dari semua sinyal bandarmologi (CVD, L/S, ETF, OI, Bybit liq, OKX)',
+      value: `${sms.score}/100`,
+      extra: `arah ${sms.direction} · conviction ${sms.conviction} · bull ${sms.bullPts}pt vs bear ${sms.bearPts}pt`,
+      bias: scoreDir,
+      status: scoreLabel,
+      meaning,
+    }));
+  }
+
+  // ── v7: Cascade Probability ───────────────────────────────────────────────
+  if (cp) {
+    const riskBias = cp.riskLevel === 'HIGH' ? 'warn' : cp.riskLevel === 'MEDIUM' ? 'warn' : 'neutral';
+    cards.push(richCard({
+      label: 'Cascade Probability',
+      whatIs: 'Estimasi risiko terjadinya liquidation cascade (longsor posisi leverage) saat ini',
+      value: `${cp.probability}%`,
+      extra: `risiko ${cp.riskLevel} · arah cascade: ${cp.likelyCascadeDirection}`,
+      bias: riskBias,
+      status: cp.riskLevel,
+      meaning: cp.note,
+    }));
+  }
+
+  // ── v7: Bybit Liquidations (real data) ───────────────────────────────────
+  if (bbl) {
+    const washout = bbl.washoutSignal !== 'NONE';
+    const washBias = bbl.washoutSignal === 'LONG_WASHOUT' ? 'bull' : bbl.washoutSignal === 'SHORT_SQUEEZE' ? 'bull' : 'neutral';
+    const washLabel = bbl.washoutSignal === 'LONG_WASHOUT' ? 'LONG WASHOUT' : bbl.washoutSignal === 'SHORT_SQUEEZE' ? 'SHORT SQUEEZE' : bbl.momentum.replace('_', ' ');
+    cards.push(richCard({
+      label: 'Bybit Liquidations (nyata)', star: bbl.washoutSignal !== 'NONE',
+      whatIs: 'Data likuidasi posisi leverage yang BENAR-BENAR terjadi di Bybit (200 event terakhir)',
+      value: `L:$${bbl.longLiqValueM?.toFixed(1) ?? 0}M vs S:$${bbl.shortLiqValueM?.toFixed(1) ?? 0}M`,
+      extra: `${bbl.longLiqCount} long liq · ${bbl.shortLiqCount} short liq${bbl.recentBurst ? ' · ⚡ BURST 30m' : ''}`,
+      bias: washout ? washBias : (bbl.momentum === 'LONGS_DOMINATED' ? 'neutral' : 'neutral'),
+      status: washLabel,
+      meaning: bbl.washoutSignal === 'LONG_WASHOUT'
+        ? 'Banyak LONG baru saja terlikuidasi paksa (kapitulasi). Secara kontrarian ini sering menandai bottom — penjual paksa sudah habis, reversalnaik lebih mungkin.'
+        : bbl.washoutSignal === 'SHORT_SQUEEZE'
+        ? 'SHORT sedang dilikuidasi massal (short squeeze). Harga naik paksa karena short cover. Momentum naik kuat tapi hati-hati reversal setelah squeeze selesai.'
+        : bbl.momentum === 'LONGS_DOMINATED'
+        ? 'Lebih banyak long yang dilikuidasi — tekanan jual. Harga mungkin masih bisa turun lebih lanjut.'
+        : 'Likuidasi seimbang — tidak ada sisi yang dominan dihukum. Pasar tidak dalam kondisi cascade.',
+    }));
+  }
+
+  // ── v7: OKX Top Trader L/S ────────────────────────────────────────────────
+  if (okxF) {
+    const lBias = okxF.bias === 'LONG_DOMINANT' ? 'bull' : okxF.bias === 'SHORT_DOMINANT' ? 'bear' : 'neutral';
+    cards.push(richCard({
+      label: 'OKX Top Trader L/S',
+      whatIs: 'Rasio posisi long/short dari top trader di OKX — konfirmasi independen dari Binance',
+      value: num(okxF.longShortRatio, 3),
+      extra: okxF.trend.replace(/_/g, ' ').toLowerCase() + ' · source: ' + okxF.source,
+      bias: lBias,
+      status: okxF.bias.replace('_', ' '),
+      meaning: okxF.bias === 'LONG_DOMINANT'
+        ? 'Smart money OKX lebih banyak long. Jika Binance L/S juga bullish → konfirmasi kuat untuk LONG.'
+        : okxF.bias === 'SHORT_DOMINANT'
+        ? 'Smart money OKX lebih banyak short. Konfirmasi bearish — terutama bila Binance juga short dominan.'
+        : 'Posisi seimbang di OKX. Tidak ada bias kuat dari smart money exchange ini.',
+    }));
+  }
+
+  // ── v7: Futures Basis Premium ─────────────────────────────────────────────
+  if (fb) {
+    const fbBias = fb.regime.includes('CONTANGO') ? (fb.basisPct > 0.03 ? 'warn' : 'neutral')
+                 : fb.regime.includes('BACKWARDATION') ? 'bear' : 'neutral';
+    cards.push(richCard({
+      label: 'Futures Basis Premium',
+      whatIs: 'Premium/discount harga perp mark vs index price — ukuran arah bias pasar futures',
+      value: `${fb.basisPct >= 0 ? '+' : ''}${fb.basisPct.toFixed(4)}%`,
+      extra: `≈${fb.annualizedPct.toFixed(0)}%/yr · ${fb.regime.replace(/_/g, ' ')}`,
+      bias: fbBias,
+      status: fb.regime.replace(/_/g, ' '),
+      meaning: fb.regime.includes('CONTANGO_BULLISH')
+        ? 'Perp premium tinggi — trader mau bayar lebih untuk long futures. Bullish bias tapi waspada crowding long.'
+        : fb.regime.includes('BACKWARDATION')
+        ? 'Futures discount vs index — kondisi langka, tanda kepanikan/hedging besar. Kontrarian bullish jangka pendek.'
+        : 'Basis flat/sedikit premium — pasar belum terlalu bias satu arah. Tidak ada tekanan leverage ekstrem.',
+    }));
+  }
+
+  // ── v7: Funding Divergence ────────────────────────────────────────────────
+  if (fd) {
+    const fdBias = fd.consensus === 'STRONG' ? 'neutral' : fd.consensus === 'WEAK' ? 'warn' : 'neutral';
+    cards.push(richCard({
+      label: 'Funding Divergence',
+      whatIs: 'Seberapa kompak semua exchange soal arah funding — tinggi = manipulasi/arbitrase aktif',
+      value: num(fd.score, 3),
+      extra: `Binance ${fd.rates?.binance != null ? fd.rates.binance.toFixed(4) : '—'}% · Bybit ${fd.rates?.bybit != null ? fd.rates.bybit.toFixed(4) : '—'}% · OKX ${fd.rates?.okx != null ? fd.rates.okx.toFixed(4) : '—'}%`,
+      bias: fdBias,
+      status: `consensus ${fd.consensus}`,
+      meaning: fd.interpretation,
+    }));
+  }
 
   // ETF flows
   if (etf) {
@@ -2569,14 +2788,14 @@ function viewFlowCard(snap, analysis) {
   return `<div class="col-span-12 border border-purple-500/40 bg-zinc-950 p-5">
     <div class="flex items-center justify-between mb-2">
       <div>
-        <span class="text-[10px] uppercase tracking-[0.15em] text-purple-300">Institutional & Cross-Exchange Flow · v6</span>
-        <div class="text-xs text-zinc-500 sans mt-0.5">Aliran duit institusi & posisi leverage lintas bursa — sinyal bandarmologi inti</div>
+        <span class="text-[10px] uppercase tracking-[0.15em] text-purple-300">Bandarmologi Dashboard · v7</span>
+        <div class="text-xs text-zinc-500 sans mt-0.5">Smart Money Score + aliran duit institusi & posisi leverage lintas bursa</div>
       </div>
       <span class="text-[10px] text-zinc-600">${cards.length} indikator aktif</span>
     </div>
 
     <div class="text-[11px] text-zinc-500 sans mb-4 leading-relaxed border-l-2 border-purple-500/30 pl-3">
-      Bagian ini membaca <span class="text-zinc-300">ke mana duit besar bergerak</span>: apakah institusi beli/jual (ETF), berapa amunisi tunai tersedia (stablecoin), siapa yang agresif di order flow (CVD), apakah trader leverage terlalu ramai di satu sisi (basis, funding), dan di mana zona likuidasi yang sering diburu harga (magnet). Warna hijau = mendukung naik, merah = mendukung turun, kuning = waspada/crowded.
+      <span class="text-zinc-300">Smart Money Score</span> merangkum semua sinyal bandarmologi menjadi angka 0–100. Di bawahnya: data likuidasi nyata (Bybit), taker flow (CVD Binance + OKX), ETF institusi, stablecoin dry powder, funding divergence, dan cascade probability. Hijau = bullish, merah = bearish, kuning = waspada/crowded.
     </div>
 
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -2910,6 +3129,7 @@ function render() {
       <div class="grid grid-cols-12 gap-3 mb-3">
         ${viewOptionsCard(snapshot, analysis)}
         ${viewOnChainCard(snapshot, analysis)}
+        ${viewOnChainExtCard(snapshot)}
       </div>
 
       <!-- v4: Macro Context (full width) -->

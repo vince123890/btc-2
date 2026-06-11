@@ -856,6 +856,152 @@ async function sourceCVD() {
 
 // ── Spot-Perp basis dihitung di handler (butuh ticker + funding markPrice) ──
 
+// =============================================================================
+//  NEW v7: Bandarmologi lanjutan — OKX Flow, Bybit Liquidations, Basis Premium
+// =============================================================================
+
+// ── OKX Taker Buy/Sell Flow Agregat (free, no key) ──────────────────────────
+// OKX = ~20% volume futures global → konfirmasi sinyal Binance CVD secara ortogonal.
+async function sourceOkxFlow() {
+  const d = await fetchJSON(
+    'https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract-top-trader?instId=BTC-USDT-SWAP&period=1H',
+    7000
+  ).catch(() => null);
+  // Jika endpoint contracts gagal, coba taker volume proxy dari mark price endpoint
+  if (!d?.data?.length) return null;
+  // Endpoint ini mengembalikan array [{ts, longShortRatio}]
+  // Ambil 2 item terakhir untuk trend direction
+  const arr = d.data;
+  const latest = arr[arr.length - 1];
+  const prev   = arr.length > 1 ? arr[arr.length - 2] : null;
+  const ratio  = parseFloat(latest?.[1] || latest?.longShortRatio || 1);
+  const prevRatio = prev ? parseFloat(prev?.[1] || prev?.longShortRatio || ratio) : ratio;
+  if (!ratio || isNaN(ratio)) return null;
+  return {
+    longShortRatio: +ratio.toFixed(4),
+    trend: ratio > prevRatio ? 'RISING_LONG' : ratio < prevRatio ? 'FALLING_LONG' : 'STABLE',
+    bias: ratio > 1.05 ? 'LONG_DOMINANT' : ratio < 0.95 ? 'SHORT_DOMINANT' : 'NEUTRAL',
+    source: 'OKX top trader L/S 1H',
+  };
+}
+
+// ── Bybit Liquidation History — real cascade data (free, no key) ─────────────
+// Lebih akurat dari estimasi: menunjukkan liquidasi yang sudah terjadi.
+async function sourceBybitLiquidations() {
+  const d = await fetchJSON(
+    'https://api.bybit.com/v5/market/liquidation?category=linear&symbol=BTCUSDT&limit=200',
+    7000
+  ).catch(() => null);
+  const list = d?.result?.list || [];
+  if (!list.length) return null;
+
+  const now = Date.now();
+  const recent30m = list.filter(l => now - parseInt(l.updatedTime || l.time || 0) < 30 * 60 * 1000);
+
+  // side=Buy → posisi LONG yang dilikuidasi (harga turun → long kena)
+  // side=Sell → posisi SHORT yang dilikuidasi (harga naik → short kena)
+  const longLiq  = list.filter(l => l.side === 'Buy');
+  const shortLiq = list.filter(l => l.side === 'Sell');
+  const recLong  = recent30m.filter(l => l.side === 'Buy');
+  const recShort = recent30m.filter(l => l.side === 'Sell');
+
+  const longValM  = longLiq.reduce((s, l)  => s + parseFloat(l.size || 0) * parseFloat(l.price || 0), 0) / 1e6;
+  const shortValM = shortLiq.reduce((s, l) => s + parseFloat(l.size || 0) * parseFloat(l.price || 0), 0) / 1e6;
+
+  const burst = recLong.length > 15 || recShort.length > 15;
+  const burstDir = recLong.length > recShort.length ? 'LONG_LIQUIDATED' : 'SHORT_LIQUIDATED';
+
+  let momentum = 'NEUTRAL';
+  if (longValM > shortValM * 1.5)  momentum = 'LONGS_DOMINATED';   // banyak long kena → bearish
+  else if (shortValM > longValM * 1.5) momentum = 'SHORTS_DOMINATED'; // banyak short kena → bullish
+
+  // Washout signal: burst long liquidation = kapitulasi → potensi reversal bullish
+  let washoutSignal = 'NONE';
+  if (burst && burstDir === 'LONG_LIQUIDATED' && recLong.length > recShort.length * 2) {
+    washoutSignal = 'LONG_WASHOUT'; // capitulation — bullish contrarian
+  } else if (burst && burstDir === 'SHORT_LIQUIDATED') {
+    washoutSignal = 'SHORT_SQUEEZE'; // short squeeze sedang berlangsung
+  }
+
+  return {
+    longLiqCount:  longLiq.length,
+    shortLiqCount: shortLiq.length,
+    longLiqValueM:  +longValM.toFixed(2),
+    shortLiqValueM: +shortValM.toFixed(2),
+    momentum,
+    recentBurst: burst,
+    burstDirection: burst ? burstDir : null,
+    washoutSignal,
+    source: 'Bybit linear 200 events',
+  };
+}
+
+// ── Futures Basis Premium (Binance perp mark vs index) ───────────────────────
+// Basis = premium/discount perp terhadap index. Basis tinggi = long crowded (bearish).
+async function sourceFuturesBasis() {
+  const d = await fetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT', 5000);
+  if (!d?.markPrice || !d?.indexPrice) return null;
+
+  const mark  = parseFloat(d.markPrice);
+  const index = parseFloat(d.indexPrice);
+  if (!mark || !index) return null;
+
+  const basisPct = ((mark - index) / index) * 100;
+  // Annualize: basis 1h * 24h * 365d (simple annualization proxy)
+  const annualizedPct = basisPct * 24 * 365;
+
+  let regime = 'NEUTRAL';
+  if (basisPct > 0.05)       regime = 'CONTANGO_BULLISH';
+  else if (basisPct > 0.01)  regime = 'SLIGHT_CONTANGO';
+  else if (basisPct > -0.01) regime = 'FLAT';
+  else if (basisPct > -0.05) regime = 'SLIGHT_BACKWARDATION';
+  else                       regime = 'BACKWARDATION_BEARISH';
+
+  return {
+    markPrice:     +mark.toFixed(2),
+    indexPrice:    +index.toFixed(2),
+    basisPct:      +basisPct.toFixed(4),
+    annualizedPct: +annualizedPct.toFixed(1),
+    regime,
+  };
+}
+
+// ── CoinMetrics Extended — CapNuvt, NVT, SOPR proxy (free community API) ─────
+async function sourceCoinMetricsExtended() {
+  const url = 'https://community-api.coinmetrics.io/v4/timeseries/asset-metrics'
+    + '?assets=btc'
+    + '&metrics=NVTAdj90,SoprFree,CapNuvtUsd'
+    + '&page_size=3&pretty=false';
+  const d = await fetchJSON(url, 8000).catch(() => null);
+  if (!d?.data?.length) return null;
+
+  const rows = d.data.filter(r => r.NVTAdj90 != null || r.SoprFree != null || r.CapNuvtUsd != null);
+  if (!rows.length) return null;
+  const latest = rows[rows.length - 1];
+
+  const nvt  = latest.NVTAdj90 ? +parseFloat(latest.NVTAdj90).toFixed(2) : null;
+  const sopr = latest.SoprFree  ? +parseFloat(latest.SoprFree).toFixed(4)  : null;
+  const nuvt = latest.CapNuvtUsd ? +parseFloat(latest.CapNuvtUsd).toFixed(0) : null;
+
+  let nvtSignal = null;
+  if (nvt != null) {
+    nvtSignal = nvt > 150 ? 'BUBBLE_ZONE'
+      : nvt > 90  ? 'OVERVALUED'
+      : nvt > 45  ? 'FAIR_VALUE'
+      : 'UNDERVALUED';
+  }
+
+  let soprSignal = null;
+  if (sopr != null) {
+    soprSignal = sopr > 1.05 ? 'PROFIT_TAKING'    // holder jual untung — distribusi
+      : sopr > 1.0  ? 'SLIGHT_PROFIT'
+      : sopr > 0.95 ? 'SLIGHT_LOSS'
+      : 'CAPITULATION';                             // holder jual rugi — akumulasi zone
+  }
+
+  return { nvt, nvtSignal, sopr, soprSignal, nuvtUsd: nuvt, date: latest.time };
+}
+
 // ── Multi-exchange funding (Bybit + OKX, free no key) ───────────────────────
 async function sourceMultiFunding() {
   const [bybit, okx] = await Promise.all([
@@ -917,6 +1063,175 @@ async function sourceCoinalyze(apiKey) {
   return Object.keys(out).length ? out : null;
 }
 
+// =============================================================================
+//  COMPUTED SIGNALS — dihitung dari data existing, tanpa API tambahan
+// =============================================================================
+
+/** Funding Rate Divergence Score: seberapa "tidak kompak" exchange soal arah funding */
+function computeFundingDivergence(binanceFunding, multiFunding) {
+  const rates = [];
+  if (binanceFunding?.fundingRate != null) rates.push(binanceFunding.fundingRate);
+  if (multiFunding?.bybit != null) rates.push(multiFunding.bybit);
+  if (multiFunding?.okx  != null) rates.push(multiFunding.okx);
+  if (rates.length < 2) return null;
+
+  const mean    = rates.reduce((a, b) => a + b, 0) / rates.length;
+  const std     = Math.sqrt(rates.reduce((s, v) => s + (v - mean) ** 2, 0) / rates.length);
+  const meanAbs = rates.map(Math.abs).reduce((a, b) => a + b, 0) / rates.length;
+  const score   = meanAbs > 0.0001 ? +(std / meanAbs).toFixed(3) : 0;
+
+  return {
+    score,
+    consensus: score < 0.3 ? 'STRONG' : score < 1.0 ? 'MODERATE' : 'WEAK',
+    rates: { binance: rates[0], bybit: multiFunding?.bybit ?? null, okx: multiFunding?.okx ?? null },
+    interpretation: score > 1.5
+      ? 'Divergensi tinggi — kemungkinan manipulasi/arbitrase aktif, sinyal arah tidak reliable'
+      : score < 0.3
+      ? 'Konsensus kuat — semua exchange sepakat, sinyal funding lebih bisa dipercaya'
+      : 'Divergensi moderat',
+  };
+}
+
+/** Smart Money Conviction Score 0–100: agregat semua bandarmologi signal */
+function computeSmartMoneyScore(snapshot) {
+  let bullPts = 0, bearPts = 0, totalWeight = 0;
+
+  // CVD taker flow (bobot 25%)
+  const cvd = snapshot.cvd;
+  if (cvd?.deltaPct != null) {
+    const w = 25;
+    const strength = Math.min(Math.abs(cvd.deltaPct) / 15, 1); // normalize 0-15% → 0-1
+    if (cvd.deltaPct > 0) bullPts += strength * w; else bearPts += strength * w;
+    totalWeight += w;
+  }
+
+  // L/S Z-score divergence (bobot 20%)
+  const ls = snapshot.longShort;
+  if (ls?.divZScore != null) {
+    const w = 20;
+    const z = ls.divZScore;
+    if (z > 1.5)       { bullPts += w; }
+    else if (z < -1.5) { bearPts += w; }
+    else               { bullPts += w * 0.5; bearPts += w * 0.5; }
+    totalWeight += w;
+  }
+
+  // OI change direction (bobot 15%)
+  const oi = snapshot.openInterest;
+  if (oi?.change24h != null) {
+    const w = 15;
+    const strength = Math.min(Math.abs(oi.change24h) / 5, 1);
+    if (oi.change24h > 0 && (snapshot.ticker?.change24h ?? 0) > 0) bullPts += strength * w;
+    else if (oi.change24h < 0 && (snapshot.ticker?.change24h ?? 0) < 0) bearPts += strength * w;
+    else { bullPts += w * 0.3; bearPts += w * 0.3; }
+    totalWeight += w;
+  }
+
+  // ETF flows (bobot 15%)
+  const etf = snapshot.etfFlows;
+  if (etf?.netFlow24h != null) {
+    const w = 15;
+    if      (etf.netFlow24h > 200e6)  bullPts += w;
+    else if (etf.netFlow24h > 50e6)   bullPts += w * 0.7;
+    else if (etf.netFlow24h < -200e6) bearPts += w;
+    else if (etf.netFlow24h < -50e6)  bearPts += w * 0.7;
+    else { bullPts += w * 0.4; bearPts += w * 0.4; }
+    totalWeight += w;
+  }
+
+  // Bybit washout signal (bobot 10%) — contrarian: long washout = buy signal
+  const bbl = snapshot.bybitLiquidations;
+  if (bbl?.washoutSignal) {
+    const w = 10;
+    if (bbl.washoutSignal === 'LONG_WASHOUT')   bullPts += w;  // kapitulasi → contrarian bullish
+    else if (bbl.washoutSignal === 'SHORT_SQUEEZE') bullPts += w * 0.8;
+    else if (bbl.momentum === 'SHORTS_DOMINATED') bearPts += w * 0.5; // short squeeze done?
+    totalWeight += w;
+  }
+
+  // OKX L/S (bobot 10%)
+  const okxF = snapshot.okxFlow;
+  if (okxF?.longShortRatio != null) {
+    const w = 10;
+    const r = okxF.longShortRatio;
+    if (r > 1.1)      bullPts += w;
+    else if (r < 0.9) bearPts += w;
+    else              { bullPts += w * 0.5; bearPts += w * 0.5; }
+    totalWeight += w;
+  }
+
+  // Stablecoin liquidity (bobot 5%)
+  const sc = snapshot.stablecoins;
+  if (sc?.liquiditySignal) {
+    const w = 5;
+    if (sc.liquiditySignal === 'EXPANDING')   bullPts += w;
+    else if (sc.liquiditySignal === 'CONTRACTING') bearPts += w;
+    else { bullPts += w * 0.5; bearPts += w * 0.5; }
+    totalWeight += w;
+  }
+
+  if (totalWeight === 0) return null;
+
+  const score = Math.round((bullPts / totalWeight) * 100);
+  const delta = Math.abs(score - 50);
+
+  return {
+    score,
+    direction:  score > 60 ? 'LONG' : score < 40 ? 'SHORT' : 'NEUTRAL',
+    conviction: delta > 30 ? 'VERY_HIGH' : delta > 20 ? 'HIGH' : delta > 10 ? 'MODERATE' : 'CONFLICTED',
+    bullPts: +bullPts.toFixed(1),
+    bearPts: +bearPts.toFixed(1),
+    totalWeight,
+  };
+}
+
+/** Liquidation Cascade Probability: seberapa tinggi risiko cascade likuidasi */
+function computeCascadeProbability(snapshot) {
+  let score = 0;
+
+  const oiChange = snapshot.openInterest?.change24h || 0;
+  const change1h = snapshot.openInterest?.change1h  || 0;
+  const price    = snapshot.ticker?.price || 0;
+
+  // OI surge dalam 1 jam
+  if (Math.abs(change1h) > 3)   score += 30;
+  else if (Math.abs(change1h) > 1.5) score += 15;
+
+  // Proximity ke liquidation magnet
+  const lm = snapshot.liqMagnets;
+  if (lm && price) {
+    const nearDown = Math.abs(price - lm.downMagnet.to)   / price < 0.015;
+    const nearUp   = Math.abs(price - lm.upMagnet.from)   / price < 0.015;
+    if (nearDown || nearUp) score += 25;
+  }
+
+  // Extreme funding (semua exchange searah ekstrem)
+  const fd = snapshot.fundingDivergence;
+  const binFr = Math.abs(snapshot.funding?.fundingRate || 0);
+  if (binFr > 0.1)      score += 25;
+  else if (binFr > 0.05) score += 12;
+  // Konsensus kuat + funding ekstrem = lebih berbahaya
+  if (fd?.consensus === 'STRONG' && binFr > 0.05) score += 10;
+
+  // CVD vs OI diverge = posisi tidak ter-cover → cascade lebih mudah terpicu
+  const cvdDelta = snapshot.cvd?.deltaPct || 0;
+  if (Math.sign(cvdDelta) !== Math.sign(oiChange) && Math.abs(oiChange) > 1) score += 15;
+
+  // Bybit burst sudah terjadi → cascade mungkin sudah mulai
+  if (snapshot.bybitLiquidations?.recentBurst) score += 10;
+
+  return {
+    probability: Math.min(score, 100),
+    riskLevel: score > 65 ? 'HIGH' : score > 35 ? 'MEDIUM' : 'LOW',
+    likelyCascadeDirection: change1h > 0 ? 'DOWN' : 'UP',
+    note: score > 65
+      ? 'Kondisi berisiko tinggi untuk cascade — hindari posisi terbuka besar sementara ini'
+      : score > 35
+      ? 'Risiko moderat — gunakan SL lebih ketat dari biasa'
+      : 'Risiko cascade rendah saat ini',
+  };
+}
+
 /**
  * Estimasi LEVEL MAGNET LIKUIDASI (computed, no key).
  * Liquidation heatmap intinya menunjukkan di mana posisi leverage akan
@@ -951,29 +1266,31 @@ function computeLiquidationMagnets(price) {
 // optional=true → kalau gagal, TIDAK dianggap error (datanya sudah dihitung dari
 // sumber lain, atau memang non-kritis). Tidak ditampilkan sebagai error menakutkan.
 const SOURCES = [
-  ['ticker',        sourceTicker,            false],
-  ['orderBook',     sourceOrderBook,         false],
-  ['funding',       sourceFunding,           false],
-  ['klinesMulti',   sourceKlinesMulti,       false],  // inti TA + market stats
-  ['supply',        sourceSupply,            true],   // opsional: market cap fallback ke coingecko
-  ['openInterest',  sourceOpenInterestHist,  false],
-  ['longShort',     sourceLongShortRatios,   false],
-  ['takerVolume',   sourceTakerVolume,       false],
-  ['cvd',           sourceCVD,               true],   // ← v6: order flow (CVD)
-  ['options',       sourceDeribitOptions,    true],   // opsional: PCR/max pain
-  ['onChain',       sourceCoinMetrics,       true],   // opsional: MVRV
-  ['stablecoins',   sourceStablecoins,       true],   // ← v6: dry powder likuiditas
-  ['etfFlows',      sourceEtfFlows,          true],   // ← v6: institutional ETF flow
-  ['multiFunding',  sourceMultiFunding,      true],   // ← v6: cross-exchange funding
-  ['macro',         sourceMacro,             true],   // opsional: DXY/Gold/SPX
-  ['fearGreed',     sourceFearGreed,         false],
-  // CoinGecko coins dihapus dari default — data change7d/30d/marketCap sudah dihitung dari Binance.
-  // Sering 429 dari shared Vercel IP & menambah 7s latensi untuk data yang sudah ada.
-  // ['coingecko',  sourceCoinGecko,         true],
-  ['global',        sourceGlobal,            true],   // opsional: BTC dominance non-kritis
-  ['mempool',       sourceMempool,           true],   // opsional: fee info
-  ['network',       sourceNetwork,           true],   // opsional: hashrate info
-  ['news',          sourceNews,              true],   // opsional: berita konteks
+  ['ticker',           sourceTicker,               false],
+  ['orderBook',        sourceOrderBook,            false],
+  ['funding',          sourceFunding,              false],
+  ['klinesMulti',      sourceKlinesMulti,          false],  // inti TA + market stats
+  ['supply',           sourceSupply,               true],
+  ['openInterest',     sourceOpenInterestHist,     false],
+  ['longShort',        sourceLongShortRatios,      false],
+  ['takerVolume',      sourceTakerVolume,          false],
+  ['cvd',              sourceCVD,                  true],   // v6: Binance futures order flow
+  ['options',          sourceDeribitOptions,       true],   // PCR/max pain
+  ['onChain',          sourceCoinMetrics,          true],   // MVRV
+  ['onChainExt',       sourceCoinMetricsExtended,  true],   // v7: NVT, SOPR, CapNuvt
+  ['stablecoins',      sourceStablecoins,          true],   // v6: dry powder
+  ['etfFlows',         sourceEtfFlows,             true],   // v6: ETF institutional flow
+  ['multiFunding',     sourceMultiFunding,         true],   // v6: cross-exchange funding
+  ['okxFlow',          sourceOkxFlow,              true],   // v7: OKX top trader L/S
+  ['bybitLiquidations',sourceBybitLiquidations,    true],   // v7: real liquidation events
+  ['futuresBasis',     sourceFuturesBasis,         true],   // v7: perp mark vs index basis
+  ['macro',            sourceMacro,                true],
+  ['fearGreed',        sourceFearGreed,            false],
+  // ['coingecko',     sourceCoinGecko,            true],   // dihapus — sering 429
+  ['global',           sourceGlobal,               true],
+  ['mempool',          sourceMempool,              true],
+  ['network',          sourceNetwork,              true],
+  ['news',             sourceNews,                 true],
 ];
 
 export default async function handler(request) {
@@ -991,7 +1308,7 @@ export default async function handler(request) {
 
   const results = await Promise.allSettled(sourcePromises);
 
-  const snapshot = { ts: Date.now(), version: 6 };
+  const snapshot = { ts: Date.now(), version: 7 };
   const errors = [];      // sumber KRITIS yang gagal (perlu perhatian)
   const degraded = [];    // sumber OPSIONAL yang gagal (tidak masalah)
 
@@ -1023,10 +1340,18 @@ export default async function handler(request) {
       ((snapshot.ticker.price - snapshot.onChain.realizedPrice) / snapshot.onChain.realizedPrice) * 100;
   }
 
+  // ─── v7: Computed bandarmologi signals (from data already fetched) ────────
+  snapshot.fundingDivergence  = computeFundingDivergence(snapshot.funding, snapshot.multiFunding);
+  snapshot.smartMoneyScore    = computeSmartMoneyScore(snapshot);
+  // cascadeProbability dihitung setelah liqMagnets siap (lihat bawah)
+
   // ─── v6: Estimasi level magnet likuidasi (computed, selalu ada) ──────────
   if (snapshot.ticker?.price) {
     snapshot.liqMagnets = computeLiquidationMagnets(snapshot.ticker.price);
   }
+
+  // ─── v7: Cascade probability (butuh liqMagnets dari atas) ────────────────
+  snapshot.cascadeProbability = computeCascadeProbability(snapshot);
 
   // ─── v6: Spot-Perp basis (dari ticker spot + funding markPrice) ──────────
   if (snapshot.ticker?.price && snapshot.funding?.markPrice) {
