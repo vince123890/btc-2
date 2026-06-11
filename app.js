@@ -1115,8 +1115,11 @@ async function loadAnalysis() {
       state.analyzeError = `Auth gagal (${err.status})`;
       state.analyzeHint = 'API key invalid atau expired. Generate ulang di aistudio.google.com';
     } else if (err.status === 429) {
-      state.analyzeError = 'Rate limit / kuota habis';
-      state.analyzeHint = 'Tunggu 1 menit atau cek quota di aistudio.google.com';
+      const isExhausted = err.message?.includes('RESOURCE_EXHAUSTED') || err.message?.includes('quota');
+      state.analyzeError = isExhausted ? 'Kuota free tier habis' : 'Rate limit — terlalu banyak request';
+      state.analyzeHint = isExhausted
+        ? 'Kuota Gemini 2.5 Pro free tier sudah habis hari ini. Solusi: (1) Ganti ke Gemini 2.5 Flash di Settings — limit 1500 req/hari, (2) Buat API key baru di aistudio.google.com, atau (3) Aktifkan billing.'
+        : 'Tunggu 1 menit lalu coba lagi.';
     } else if (err.status === 400) {
       state.analyzeError = 'Bad request: ' + (err.message || '').slice(0, 200);
       state.analyzeHint = 'Mungkin model tidak support fitur ini — coba switch model di Settings.';
