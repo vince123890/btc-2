@@ -683,7 +683,7 @@ async function callAgentText(apiKey, modelId, prompt, signal) {
       headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.8, topP: 0.95, maxOutputTokens: 2000 },
+        generationConfig: { temperature: 0.8, topP: 0.95, maxOutputTokens: 3500 },
         safetySettings: [
           { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_ONLY_HIGH' },
           { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_ONLY_HIGH' },
@@ -2637,23 +2637,35 @@ function viewDebateCard(analysis) {
       <span class="text-[10px] text-zinc-600">multi-agent reasoning</span>
     </div>
 
-    <!-- items-start: tiap kolom tingginya mengikuti kontennya sendiri, tidak force equal-height -->
+    <!-- Bull & Bear cards — full text, no clamp, dengan collapse toggle -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 items-start">
       <!-- Bull case -->
       <div class="border border-emerald-500/30 bg-emerald-500/[0.04] p-4">
-        <div class="flex items-center gap-2 mb-3">
-          <span class="text-emerald-400 text-sm">▲</span>
-          <span class="text-[10px] uppercase tracking-wider text-emerald-400 font-medium">Bull Researcher</span>
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <span class="text-emerald-400 text-sm">▲</span>
+            <span class="text-[10px] uppercase tracking-wider text-emerald-400 font-medium">Bull Researcher</span>
+          </div>
+          <button onclick="window._app.toggleDebate(this)" data-target="bull-body-${Date.now()}"
+            class="text-[10px] text-zinc-500 hover:text-zinc-300 uppercase tracking-wider sans transition-colors px-2 py-0.5 border border-zinc-800 hover:border-zinc-600">
+            ▲ collapse
+          </button>
         </div>
-        <div class="text-xs text-zinc-300 sans leading-relaxed">${renderMd(d.bullCase || '—')}</div>
+        <div id="debate-bull-body" class="text-xs text-zinc-300 sans leading-relaxed">${renderMd(d.bullCase || '—')}</div>
       </div>
       <!-- Bear case -->
       <div class="border border-red-500/30 bg-red-500/[0.04] p-4">
-        <div class="flex items-center gap-2 mb-3">
-          <span class="text-red-400 text-sm">▼</span>
-          <span class="text-[10px] uppercase tracking-wider text-red-400 font-medium">Bear Researcher</span>
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <span class="text-red-400 text-sm">▼</span>
+            <span class="text-[10px] uppercase tracking-wider text-red-400 font-medium">Bear Researcher</span>
+          </div>
+          <button onclick="window._app.toggleDebate(this)" data-target="bear-body-${Date.now()}"
+            class="text-[10px] text-zinc-500 hover:text-zinc-300 uppercase tracking-wider sans transition-colors px-2 py-0.5 border border-zinc-800 hover:border-zinc-600">
+            ▲ collapse
+          </button>
         </div>
-        <div class="text-xs text-zinc-300 sans leading-relaxed">${renderMd(d.bearCase || '—')}</div>
+        <div id="debate-bear-body" class="text-xs text-zinc-300 sans leading-relaxed">${renderMd(d.bearCase || '—')}</div>
       </div>
     </div>
 
@@ -2980,6 +2992,20 @@ function render() {
 // =============================================================================
 //  BOOT
 // =============================================================================
+function toggleDebate(btn) {
+  // Temukan body div saudara terdekat setelah parent div header
+  const card = btn.closest('.border');
+  if (!card) return;
+  // Body adalah div terakhir di card (setelah header flex div)
+  const body = card.querySelector('[id^="debate-bull-body"], [id^="debate-bear-body"]');
+  if (!body) return;
+  const isCollapsed = body.style.display === 'none';
+  body.style.display = isCollapsed ? '' : 'none';
+  btn.textContent = isCollapsed ? '▲ collapse' : '▼ expand';
+  btn.classList.toggle('text-blue-400', !isCollapsed);
+  btn.classList.toggle('text-zinc-500', isCollapsed);
+}
+
 window._app = {
   loadSnapshot,
   loadAnalysis,
@@ -2994,6 +3020,7 @@ window._app = {
   setMode,
   saveCoinalyzeKey,
   clearCoinalyzeKey,
+  toggleDebate,
 };
 
 // Initial load
