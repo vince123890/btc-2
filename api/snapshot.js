@@ -304,11 +304,55 @@ function deriveMarketStats(d1ohlcv, currentPrice, circulatingSupply) {
 
 
 // =============================================================================
+//  COIN CONFIG (v9) — semua identifier per-venue & feature flag per coin
+//  Sumber yang tidak tersedia untuk sebuah coin di-skip via flag hasX,
+//  ditandai notApplicable di sourceHealth (bukan error/degraded).
+// =============================================================================
+const COINS = {
+  BTC: {
+    symbol: 'BTC', name: 'Bitcoin',
+    binance: 'BTCUSDT', okxSwap: 'BTC-USDT-SWAP', okxFamily: 'BTC-USDT', okxCtVal: 0.01,
+    bitfinex: 'tBTCUSD', coinbase: 'BTC-USD', upbit: 'KRW-BTC', hl: 'BTC',
+    deribit: 'BTC', yahooFut: 'BTC=F', soso: 'us-btc-spot', coinalyze: 'BTCUSDT_PERP.A',
+    cotMarket: 'BITCOIN - CHICAGO MERCANTILE EXCHANGE', cm: 'btc', cryptopanic: 'BTC',
+    pmSearch: /bitcoin|btc/i,
+    hasNupl: true, hasMiner: true, hasNetwork: true, hasDvol: true, hasOptions: true,
+  },
+  ETH: {
+    symbol: 'ETH', name: 'Ethereum',
+    binance: 'ETHUSDT', okxSwap: 'ETH-USDT-SWAP', okxFamily: 'ETH-USDT', okxCtVal: 0.1,
+    bitfinex: 'tETHUSD', coinbase: 'ETH-USD', upbit: 'KRW-ETH', hl: 'ETH',
+    deribit: 'ETH', yahooFut: 'ETH=F', soso: 'us-eth-spot', coinalyze: 'ETHUSDT_PERP.A',
+    cotMarket: 'ETHER CASH SETTLED - CHICAGO MERCANTILE EXCHANGE', cm: 'eth', cryptopanic: 'ETH',
+    pmSearch: /ethereum|\beth\b/i,
+    hasNupl: false, hasMiner: false, hasNetwork: false, hasDvol: true, hasOptions: true,
+  },
+  SOL: {
+    symbol: 'SOL', name: 'Solana',
+    binance: 'SOLUSDT', okxSwap: 'SOL-USDT-SWAP', okxFamily: 'SOL-USDT', okxCtVal: 1,
+    bitfinex: 'tSOLUSD', coinbase: 'SOL-USD', upbit: 'KRW-SOL', hl: 'SOL',
+    deribit: null, yahooFut: 'SOL=F', soso: 'us-sol-spot', coinalyze: 'SOLUSDT_PERP.A',
+    cotMarket: 'SOL - CHICAGO MERCANTILE EXCHANGE', cm: 'sol', cryptopanic: 'SOL',
+    pmSearch: /solana|\bsol\b/i,
+    hasNupl: false, hasMiner: false, hasNetwork: false, hasDvol: false, hasOptions: false,
+  },
+  XRP: {
+    symbol: 'XRP', name: 'XRP',
+    binance: 'XRPUSDT', okxSwap: 'XRP-USDT-SWAP', okxFamily: 'XRP-USDT', okxCtVal: 100,
+    bitfinex: 'tXRPUSD', coinbase: 'XRP-USD', upbit: 'KRW-XRP', hl: 'XRP',
+    deribit: null, yahooFut: 'XRP=F', soso: 'us-xrp-spot', coinalyze: 'XRPUSDT_PERP.A',
+    cotMarket: 'XRP - CHICAGO MERCANTILE EXCHANGE', cm: 'xrp', cryptopanic: 'XRP',
+    pmSearch: /\bxrp\b|ripple/i,
+    hasNupl: false, hasMiner: false, hasNetwork: false, hasDvol: false, hasOptions: false,
+  },
+};
+
+// =============================================================================
 //  DATA SOURCES
 // =============================================================================
 
-async function sourceTicker() {
-  const d = await fetchJSON('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
+async function sourceTicker(cfg) {
+  const d = await fetchJSON(`https://api.binance.com/api/v3/ticker/24hr?symbol=${cfg.binance}`);
   return {
     price: +d.lastPrice,
     change24h: +d.priceChangePercent,
@@ -318,8 +362,8 @@ async function sourceTicker() {
   };
 }
 
-async function sourceOrderBook() {
-  const d = await fetchJSON('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=500');
+async function sourceOrderBook(cfg) {
+  const d = await fetchJSON(`https://api.binance.com/api/v3/depth?symbol=${cfg.binance}&limit=500`);
   const toWall = arr => arr
     .map(r => ({ price: +r[0], qty: +r[1], total: +r[0] * +r[1] }))
     .sort((a, b) => b.total - a.total)
@@ -331,8 +375,8 @@ async function sourceOrderBook() {
   return { bids, asks, bidWall, askWall, ratio: bidWall / (bidWall + askWall) };
 }
 
-async function sourceFunding() {
-  const d = await fetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT');
+async function sourceFunding(cfg) {
+  const d = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${cfg.binance}`);
   return {
     fundingRate: +d.lastFundingRate * 100,
     markPrice: +d.markPrice,
@@ -340,12 +384,12 @@ async function sourceFunding() {
   };
 }
 
-async function sourceKlinesMulti() {
+async function sourceKlinesMulti(cfg) {
   // Fetch 3 timeframe paralel
   const [r1h, r4h, r1d] = await Promise.all([
-    fetchJSON('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=200'),
-    fetchJSON('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=100'),
-    fetchJSON('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=100'),
+    fetchJSON(`https://api.binance.com/api/v3/klines?symbol=${cfg.binance}&interval=1h&limit=200`),
+    fetchJSON(`https://api.binance.com/api/v3/klines?symbol=${cfg.binance}&interval=4h&limit=100`),
+    fetchJSON(`https://api.binance.com/api/v3/klines?symbol=${cfg.binance}&interval=1d&limit=100`),
   ]);
   // Binance kline format: [openTime, open, high, low, close, volume, ...]
   const parse = r => ({
@@ -373,9 +417,9 @@ async function sourceSupply() {
 //  NEW v3: Derivatives intelligence (Binance Futures public API)
 // ──────────────────────────────────────────────────────────────
 
-async function sourceOpenInterestHist() {
+async function sourceOpenInterestHist(cfg) {
   const d = await fetchJSON(
-    'https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=1h&limit=24'
+    `https://fapi.binance.com/futures/data/openInterestHist?symbol=${cfg.binance}&period=1h&limit=24`
   );
   if (!d || !d.length) return null;
   // d[i] = { timestamp, sumOpenInterest, sumOpenInterestValue }
@@ -391,11 +435,11 @@ async function sourceOpenInterestHist() {
   };
 }
 
-async function sourceLongShortRatios() {
+async function sourceLongShortRatios(cfg) {
   // Dua endpoint paralel: top trader vs global retail
   const [top, global] = await Promise.all([
-    fetchJSON('https://fapi.binance.com/futures/data/topLongShortAccountRatio?symbol=BTCUSDT&period=1h&limit=24'),
-    fetchJSON('https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=1h&limit=24'),
+    fetchJSON(`https://fapi.binance.com/futures/data/topLongShortAccountRatio?symbol=${cfg.binance}&period=1h&limit=24`),
+    fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${cfg.binance}&period=1h&limit=24`),
   ]);
   if (!top?.length || !global?.length) return null;
   const lastTop    = +top[top.length - 1].longShortRatio;
@@ -433,9 +477,9 @@ async function sourceLongShortRatios() {
   };
 }
 
-async function sourceTakerVolume() {
+async function sourceTakerVolume(cfg) {
   const d = await fetchJSON(
-    'https://fapi.binance.com/futures/data/takerlongshortRatio?symbol=BTCUSDT&period=1h&limit=24'
+    `https://fapi.binance.com/futures/data/takerlongshortRatio?symbol=${cfg.binance}&period=1h&limit=24`
   );
   if (!d || !d.length) return null;
   // d[i] = { buySellRatio, buyVol, sellVol, timestamp }
@@ -469,10 +513,12 @@ async function sourceFearGreed() {
 // market stats dihitung dari Binance klines).
 
 // CoinGecko global — best effort untuk BTC dominance (non-kritis).
-async function sourceGlobal() {
+async function sourceGlobal(cfg) {
   const d = await fetchJSON('https://api.coingecko.com/api/v3/global', 7000);
   return {
     btcDominance: d.data.market_cap_percentage.btc,
+    // v9: dominance coin aktif (CoinGecko punya btc/eth/sol/xrp di top-10)
+    coinDominance: d.data.market_cap_percentage[cfg.cm] ?? null,
     totalMcap: d.data.total_market_cap.usd,
   };
 }
@@ -536,16 +582,16 @@ async function sourceNews() {
 //  NEW v4: Options flow (Deribit public API)
 // ──────────────────────────────────────────────────────────────────────────
 
-async function sourceDeribitOptions() {
-  // Deribit returns ALL BTC options summary in one call (~300 instruments)
+async function sourceDeribitOptions(cfg) {
+  // Deribit returns ALL options summary untuk satu currency dalam satu call
   const d = await fetchJSON(
-    'https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option',
+    `https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=${cfg.deribit}&kind=option`,
     6000
   );
   if (!d?.result?.length) return null;
   const opts = d.result;
 
-  // Parse instrument_name: "BTC-25APR25-90000-C" → expiry, strike, type
+  // Parse instrument_name: "BTC-25APR25-90000-C" / "ETH-..." → expiry, strike, type
   const parsed = opts.map(o => {
     const parts = o.instrument_name.split('-');
     if (parts.length !== 4) return null;
@@ -641,10 +687,10 @@ async function sourceDeribitOptions() {
 //  NEW v4: On-chain metrics (CoinMetrics Community API - free, no key)
 // ──────────────────────────────────────────────────────────────────────────
 
-async function sourceCoinMetrics() {
+async function sourceCoinMetrics(cfg) {
   // Free Community API — daily data, last 30 days for context
   const url = 'https://community-api.coinmetrics.io/v4/timeseries/asset-metrics'
-    + '?assets=btc'
+    + `?assets=${cfg.cm}`
     + '&metrics=CapMVRVCur,SplyCur,PriceUSD'
     + '&page_size=30&pretty=false';
   const d = await fetchJSON(url, 6000);
@@ -806,7 +852,7 @@ async function sourceStablecoins() {
 // Endpoint lama sosovalue.xyz/api/... TIDAK PERNAH ADA (dead code v6) — diganti
 // Open API resmi. Daftar gratis di sosovalue.com → API key, kirim via header
 // 'x-soso-key' dari browser (pola BYOK seperti Coinalyze).
-async function sourceEtfFlows(apiKey) {
+async function sourceEtfFlows(apiKey, cfg) {
   if (!apiKey) return null;
   const ctrl = new AbortController();
   const tid = setTimeout(() => ctrl.abort(), 8000);
@@ -815,7 +861,7 @@ async function sourceEtfFlows(apiKey) {
       method: 'POST',
       signal: ctrl.signal,
       headers: { 'x-soso-api-key': apiKey, 'content-type': 'application/json', 'accept': 'application/json' },
-      body: JSON.stringify({ type: 'us-btc-spot' }),
+      body: JSON.stringify({ type: cfg.soso }),
     });
     if (!r.ok) throw new Error(`SoSoValue HTTP ${r.status}`);
     const d = await r.json();
@@ -855,8 +901,8 @@ async function sourceEtfFlows(apiKey) {
 // ── CVD (Cumulative Volume Delta) dari Binance FUTURES aggTrades — order flow ─
 // Menggunakan futures (fapi) bukan spot, karena 75-85% volume BTC ada di futures.
 // Ambil 1000 trade terakhir dari FUTURES untuk sinyal order flow yang representatif.
-async function sourceCVD() {
-  const d = await fetchJSON('https://fapi.binance.com/fapi/v1/aggTrades?symbol=BTCUSDT&limit=1000');
+async function sourceCVD(cfg) {
+  const d = await fetchJSON(`https://fapi.binance.com/fapi/v1/aggTrades?symbol=${cfg.binance}&limit=1000`);
   if (!Array.isArray(d) || !d.length) return null;
   let buyVol = 0, sellVol = 0;
   for (const t of d) {
@@ -884,9 +930,9 @@ async function sourceCVD() {
 
 // ── OKX Taker Buy/Sell Flow Agregat (free, no key) ──────────────────────────
 // OKX = ~20% volume futures global → konfirmasi sinyal Binance CVD secara ortogonal.
-async function sourceOkxFlow() {
+async function sourceOkxFlow(cfg) {
   const d = await fetchJSON(
-    'https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract-top-trader?instId=BTC-USDT-SWAP&period=1H',
+    `https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract-top-trader?instId=${cfg.okxSwap}&period=1H`,
     7000
   ).catch(() => null);
   // Jika endpoint contracts gagal, coba taker volume proxy dari mark price endpoint
@@ -909,9 +955,9 @@ async function sourceOkxFlow() {
 
 // ── Bybit Liquidation History — real cascade data (free, no key) ─────────────
 // Lebih akurat dari estimasi: menunjukkan liquidasi yang sudah terjadi.
-async function sourceBybitLiquidations() {
+async function sourceBybitLiquidations(cfg) {
   const d = await fetchJSON(
-    'https://api.bybit.com/v5/market/liquidation?category=linear&symbol=BTCUSDT&limit=200',
+    `https://api.bybit.com/v5/market/liquidation?category=linear&symbol=${cfg.binance}&limit=200`,
     7000
   ).catch(() => null);
   const list = d?.result?.list || [];
@@ -960,8 +1006,8 @@ async function sourceBybitLiquidations() {
 
 // ── Futures Basis Premium (Binance perp mark vs index) ───────────────────────
 // Basis = premium/discount perp terhadap index. Basis tinggi = long crowded (bearish).
-async function sourceFuturesBasis() {
-  const d = await fetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT', 5000);
+async function sourceFuturesBasis(cfg) {
+  const d = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${cfg.binance}`, 5000);
   if (!d?.markPrice || !d?.indexPrice) return null;
 
   const mark  = parseFloat(d.markPrice);
@@ -989,9 +1035,9 @@ async function sourceFuturesBasis() {
 }
 
 // ── CoinMetrics Extended — CapNuvt, NVT, SOPR proxy (free community API) ─────
-async function sourceCoinMetricsExtended() {
+async function sourceCoinMetricsExtended(cfg) {
   const url = 'https://community-api.coinmetrics.io/v4/timeseries/asset-metrics'
-    + '?assets=btc'
+    + `?assets=${cfg.cm}`
     + '&metrics=NVTAdj90,SoprFree,CapNuvtUsd'
     + '&page_size=3&pretty=false';
   const d = await fetchJSON(url, 8000).catch(() => null);
@@ -1025,10 +1071,10 @@ async function sourceCoinMetricsExtended() {
 }
 
 // ── Multi-exchange funding (Bybit + OKX, free no key) ───────────────────────
-async function sourceMultiFunding() {
+async function sourceMultiFunding(cfg) {
   const [bybit, okx] = await Promise.all([
-    fetchJSON('https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT', 6000).catch(() => null),
-    fetchJSON('https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP', 6000).catch(() => null),
+    fetchJSON(`https://api.bybit.com/v5/market/tickers?category=linear&symbol=${cfg.binance}`, 6000).catch(() => null),
+    fetchJSON(`https://www.okx.com/api/v5/public/funding-rate?instId=${cfg.okxSwap}`, 6000).catch(() => null),
   ]);
   const result = {};
   if (bybit?.result?.list?.[0]?.fundingRate != null) {
@@ -1044,8 +1090,8 @@ async function sourceMultiFunding() {
 // ── Coinalyze (BUTUH API KEY GRATIS — daftar di coinalyze.net) ──────────────
 //    Alternatif GRATIS untuk CoinGlass. Liquidation + OI agregat lintas bursa.
 //    Key dikirim browser via header 'x-coinalyze-key'. Kalau tidak ada → skip.
-//    Rate limit 40 call/menit. Symbol BTC perp aggregate: 'BTCUSDT_PERP.A'
-async function sourceCoinalyze(apiKey) {
+//    Rate limit 40 call/menit. Symbol perp aggregate: '{SYM}USDT_PERP.A'
+async function sourceCoinalyze(apiKey, cfg) {
   if (!apiKey) return null;
   const base = 'https://api.coinalyze.net/v1';
   const headers = { 'api_key': apiKey, 'accept': 'application/json' };
@@ -1061,7 +1107,7 @@ async function sourceCoinalyze(apiKey) {
   // Liquidation history 24h (1 candle harian) + current OI agregat
   const now = Math.floor(Date.now() / 1000);
   const from = now - 26 * 3600;
-  const sym = 'BTCUSDT_PERP.A';   // .A = aggregated across exchanges
+  const sym = cfg.coinalyze;   // .A = aggregated across exchanges
   const [liq, oi] = await Promise.all([
     get(`/liquidation-history?symbols=${sym}&interval=daily&from=${from}&to=${now}&convert_to_usd=true`).catch(() => null),
     get(`/open-interest?symbols=${sym}&convert_to_usd=true`).catch(() => null),
@@ -1093,7 +1139,7 @@ async function sourceCoinalyze(apiKey) {
 // ── §3.2 Hyperliquid — perp DEX terbesar (TANPA KEY) ─────────────────────────
 // Funding per JAM → ×8 untuk dibanding funding 8h CEX. Sinyal ortogonal:
 // positioning whale DEX vs retail CEX.
-async function sourceHyperliquid() {
+async function sourceHyperliquid(cfg) {
   const ctrl = new AbortController();
   const tid = setTimeout(() => ctrl.abort(), 7000);
   try {
@@ -1108,7 +1154,7 @@ async function sourceHyperliquid() {
     const universe = d?.[0]?.universe;
     const ctxs = d?.[1];
     if (!Array.isArray(universe) || !Array.isArray(ctxs)) return null;
-    const i = universe.findIndex(u => u?.name === 'BTC');
+    const i = universe.findIndex(u => u?.name === cfg.hl);
     if (i < 0 || !ctxs[i]) return null;
     const c = ctxs[i];
     const funding1h = parseFloat(c.funding) * 100;          // % per jam
@@ -1133,15 +1179,16 @@ async function sourceHyperliquid() {
 // ── §3.3 Bitfinex — margin long/short positions aktual (TANPA KEY) ───────────
 // Satu-satunya bursa besar yang publikasi JUMLAH posisi margin (bukan rasio
 // akun). Whale-watching klasik. Delta 24h = sinyal akumulasi/build-up.
-async function sourceBitfinexMargin() {
+async function sourceBitfinexMargin(cfg) {
   const dayAgo = Date.now() - 24 * 3600 * 1000;
+  const sym = cfg.bitfinex;
   const [longNow, shortNow, longPrev, shortPrev] = await Promise.all([
-    fetchJSON('https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:tBTCUSD:long/last', 6000),
-    fetchJSON('https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:tBTCUSD:short/last', 6000),
-    fetchJSON(`https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:tBTCUSD:long/hist?limit=1&start=${dayAgo}&sort=1`, 6000).catch(() => null),
-    fetchJSON(`https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:tBTCUSD:short/hist?limit=1&start=${dayAgo}&sort=1`, 6000).catch(() => null),
+    fetchJSON(`https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:${sym}:long/last`, 6000),
+    fetchJSON(`https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:${sym}:short/last`, 6000),
+    fetchJSON(`https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:${sym}:long/hist?limit=1&start=${dayAgo}&sort=1`, 6000).catch(() => null),
+    fetchJSON(`https://api-pub.bitfinex.com/v2/stats1/pos.size:1m:${sym}:short/hist?limit=1&start=${dayAgo}&sort=1`, 6000).catch(() => null),
   ]);
-  const long  = Array.isArray(longNow)  ? +longNow[1]  : null;   // [ts, value] dalam BTC
+  const long  = Array.isArray(longNow)  ? +longNow[1]  : null;   // [ts, value] dalam unit coin
   const short = Array.isArray(shortNow) ? +shortNow[1] : null;
   if (long == null || short == null) return null;
   const longAgo  = Array.isArray(longPrev?.[0])  ? +longPrev[0][1]  : null;
@@ -1169,8 +1216,8 @@ async function sourceBitfinexMargin() {
 // ── §3.1 CFTC COT — posisi CME Bitcoin Futures (TANPA KEY, mingguan) ─────────
 // Satu-satunya data posisi institusi yang diaudit regulator. Snapshot Selasa,
 // rilis Jumat → sinyal LAMBAT, bobot untuk swing, bukan scalp.
-async function sourceCftcCot() {
-  const where = encodeURIComponent("market_and_exchange_names like 'BITCOIN - CHICAGO MERCANTILE EXCHANGE%'");
+async function sourceCftcCot(cfg) {
+  const where = encodeURIComponent(`market_and_exchange_names like '${cfg.cotMarket}%'`);
   const order = encodeURIComponent('report_date_as_yyyy_mm_dd DESC');
   const d = await fetchJSON(
     `https://publicreporting.cftc.gov/resource/gpe5-46if.json?$limit=4&$order=${order}&$where=${where}`,
@@ -1218,11 +1265,11 @@ async function sourceCftcCot() {
 }
 
 // ── §3.4 Deribit DVOL — implied volatility index (TANPA KEY) ─────────────────
-async function sourceDvol() {
+async function sourceDvol(cfg) {
   const now = Date.now();
   const weekAgo = now - 7 * 24 * 3600 * 1000;
   const d = await fetchJSON(
-    `https://www.deribit.com/api/v2/public/get_volatility_index_data?currency=BTC&start_timestamp=${weekAgo}&end_timestamp=${now}&resolution=3600`,
+    `https://www.deribit.com/api/v2/public/get_volatility_index_data?currency=${cfg.deribit}&start_timestamp=${weekAgo}&end_timestamp=${now}&resolution=3600`,
     7000
   );
   const data = d?.result?.data;
@@ -1251,15 +1298,15 @@ async function sourceDvol() {
 }
 
 // ── §3.5 OKX liquidation orders (TANPA KEY) — pelengkap Bybit ────────────────
-async function sourceOkxLiquidations() {
+async function sourceOkxLiquidations(cfg) {
   const d = await fetchJSON(
-    'https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&instFamily=BTC-USDT&state=filled&limit=100',
+    `https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&instFamily=${cfg.okxFamily}&state=filled&limit=100`,
     7000
   );
   const details = d?.data?.[0]?.details;
   if (!Array.isArray(details) || !details.length) return null;
   const now = Date.now();
-  const CT_VAL = 0.01;   // 1 kontrak BTC-USDT-SWAP = 0.01 BTC
+  const CT_VAL = cfg.okxCtVal;   // nilai 1 kontrak: BTC 0.01, ETH 0.1, SOL 1, XRP 100
   let longCount = 0, shortCount = 0, longUsd = 0, shortUsd = 0;
   let recentLong = 0, recentShort = 0;
   for (const ev of details) {
@@ -1277,22 +1324,22 @@ async function sourceOkxLiquidations() {
     shortLiqValueM: +(shortUsd / 1e6).toFixed(2),
     recentBurst: burst,
     burstDirection: burst ? (recentLong > recentShort ? 'LONG_LIQUIDATED' : 'SHORT_LIQUIDATED') : null,
-    source: 'OKX SWAP BTC-USDT 100 events',
+    source: `OKX SWAP ${cfg.okxFamily} 100 events`,
   };
 }
 
 // ── §4.1 Coinbase Premium — institusi & retail US (TANPA KEY) ────────────────
 // Premium dihitung di handler (butuh harga Binance dari snapshot).
-async function sourceCoinbaseTicker() {
-  const d = await fetchJSON('https://api.exchange.coinbase.com/products/BTC-USD/ticker', 6000);
+async function sourceCoinbaseTicker(cfg) {
+  const d = await fetchJSON(`https://api.exchange.coinbase.com/products/${cfg.coinbase}/ticker`, 6000);
   const price = parseFloat(d?.price);
   return price > 0 ? { price } : null;
 }
 
 // ── §4.2 Kimchi Premium — retail Asia (TANPA KEY) ────────────────────────────
-async function sourceKimchi() {
+async function sourceKimchi(cfg) {
   const [upbit, fx] = await Promise.all([
-    fetchJSON('https://api.upbit.com/v1/ticker?markets=KRW-BTC', 6000),
+    fetchJSON(`https://api.upbit.com/v1/ticker?markets=${cfg.upbit}`, 6000),
     fetchJSON('https://open.er-api.com/v6/latest/USD', 6000),
   ]);
   const krwPrice = upbit?.[0]?.trade_price;
@@ -1301,10 +1348,10 @@ async function sourceKimchi() {
   return { upbitUsd: krwPrice / usdkrw, usdkrw };
 }
 
-// ── §4.3 CME Gap — magnet harga weekend (TANPA KEY via Yahoo BTC=F) ──────────
-async function sourceCmeGap() {
+// ── §4.3 CME Gap — magnet harga weekend (TANPA KEY via Yahoo futures CME) ────
+async function sourceCmeGap(cfg) {
   const d = await fetchJSON(
-    'https://query1.finance.yahoo.com/v8/finance/chart/BTC=F?interval=1d&range=10d',
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(cfg.yahooFut)}?interval=1d&range=10d`,
     6000
   );
   const res = d?.chart?.result?.[0];
@@ -1344,7 +1391,7 @@ async function sourceCmeGap() {
 }
 
 // ── §5.3 Polymarket — prediction market odds (TANPA KEY, eksperimental) ──────
-async function sourcePolymarket() {
+async function sourcePolymarket(cfg) {
   const d = await fetchJSON(
     'https://gamma-api.polymarket.com/markets?closed=false&limit=40&order=volume24hr&ascending=false',
     7000
@@ -1352,7 +1399,7 @@ async function sourcePolymarket() {
   if (!Array.isArray(d)) return null;
   const parse = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : v; } catch (_) { return null; } };
   const btcMarkets = d
-    .filter(m => /bitcoin|btc/i.test(m?.question || ''))
+    .filter(m => cfg.pmSearch.test(m?.question || ''))
     .slice(0, 3)
     .map(m => {
       const outcomes = parse(m.outcomes) || [];
@@ -1413,10 +1460,10 @@ async function sourceFred(apiKey) {
 }
 
 // ── §5.2 CryptoPanic — news + voting bullish/bearish (FREE KEY) ──────────────
-async function sourceCryptoPanic(apiKey) {
+async function sourceCryptoPanic(apiKey, cfg) {
   if (!apiKey) return null;
   const d = await fetchJSON(
-    `https://cryptopanic.com/api/v1/posts/?auth_token=${apiKey}&currencies=BTC&filter=hot&public=true`,
+    `https://cryptopanic.com/api/v1/posts/?auth_token=${apiKey}&currencies=${cfg.cryptopanic}&filter=hot&public=true`,
     7000
   );
   if (!d?.results?.length) return null;
@@ -1835,21 +1882,23 @@ function computeLiquidationMagnets(price) {
   };
 }
 
-// Format: [label, fn, optional]
+// Format: [label, fn, optional, flag]
 // optional=true → kalau gagal, TIDAK dianggap error (datanya sudah dihitung dari
 // sumber lain, atau memang non-kritis). Tidak ditampilkan sebagai error menakutkan.
+// flag (v9) → nama feature-flag di COINS; bila cfg[flag] === false sumber
+// di-skip untuk coin itu (notApplicable, bukan degraded).
 const SOURCES = [
   ['ticker',           sourceTicker,               false],
   ['orderBook',        sourceOrderBook,            false],
   ['funding',          sourceFunding,              false],
   ['klinesMulti',      sourceKlinesMulti,          false],  // inti TA + market stats
-  ['supply',           sourceSupply,               true],
+  ['supply',           sourceSupply,               true,  'hasNetwork'],  // blockchain.info = BTC only
   ['openInterest',     sourceOpenInterestHist,     false],
   ['longShort',        sourceLongShortRatios,      false],
   ['takerVolume',      sourceTakerVolume,          false],
   ['cvd',              sourceCVD,                  true],   // v6: Binance futures order flow
-  ['options',          sourceDeribitOptions,       true],   // PCR/max pain
-  ['onChain',          sourceCoinMetrics,          true],   // MVRV
+  ['options',          sourceDeribitOptions,       true,  'hasOptions'],  // PCR/max pain — BTC/ETH
+  ['onChain',          sourceCoinMetrics,          true],   // MVRV (coverage sol/xrp terbatas — biarkan null)
   ['onChainExt',       sourceCoinMetricsExtended,  true],   // v7: NVT, SOPR, CapNuvt
   ['stablecoins',      sourceStablecoins,          true],   // v6: dry powder
   ['multiFunding',     sourceMultiFunding,         true],   // v6: cross-exchange funding
@@ -1860,31 +1909,31 @@ const SOURCES = [
   ['hyperliquid',      sourceHyperliquid,          true],   // §3.2 perp DEX whale
   ['bitfinexMargin',   sourceBitfinexMargin,       true],   // §3.3 margin positions
   ['cftcCot',          sourceCftcCot,              true],   // §3.1 CME COT mingguan
-  ['dvol',             sourceDvol,                 true],   // §3.4 implied volatility
+  ['dvol',             sourceDvol,                 true,  'hasDvol'],     // §3.4 — BTC/ETH only
   ['okxLiquidations',  sourceOkxLiquidations,      true],   // §3.5 pelengkap Bybit
   ['coinbaseTicker',   sourceCoinbaseTicker,       true],   // §4.1 premium dihitung di handler
   ['kimchiRaw',        sourceKimchi,               true],   // §4.2 premium dihitung di handler
   ['cmeGap',           sourceCmeGap,               true],   // §4.3 magnet gap CME
   ['polymarket',       sourcePolymarket,           true],   // §5.3 eksperimental
-  ['minerPressure',    sourceMinerPressure,        true],   // §5.4 proxy kapitulasi miner
+  ['minerPressure',    sourceMinerPressure,        true,  'hasMiner'],    // §5.4 — BTC only
   ['macro',            sourceMacro,                true],   // v8: Yahoo primary, Stooq fallback
   ['fearGreed',        sourceFearGreed,            false],
   ['global',           sourceGlobal,               true],
-  ['mempool',          sourceMempool,              true],
-  ['network',          sourceNetwork,              true],
+  ['mempool',          sourceMempool,              true,  'hasNetwork'],  // BTC only
+  ['network',          sourceNetwork,              true,  'hasNetwork'],  // BTC only
   ['news',             sourceNews,                 true],
 ];
 
-// Keyed sources (BYOK via header) — [label, headerFn]
+// Keyed sources (BYOK via header) — [label, headerFn, flag]
 // etfFlows pindah ke sini (SoSoValue Open API butuh free key, endpoint lama mati)
 const KEYED_SOURCES = [
-  ['coinalyze', (h) => { const k = h('x-coinalyze-key'); return k ? sourceCoinalyze(k) : null; }],
-  ['etfFlows',  (h) => { const k = h('x-soso-key');      return k ? sourceEtfFlows(k) : null; }],
+  ['coinalyze', (h, cfg) => { const k = h('x-coinalyze-key'); return k ? sourceCoinalyze(k, cfg) : null; }],
+  ['etfFlows',  (h, cfg) => { const k = h('x-soso-key');      return k ? sourceEtfFlows(k, cfg) : null; }],
   ['fred',      (h) => { const k = h('x-fred-key');      return k ? sourceFred(k) : null; }],
-  ['newsCp',    (h) => { const k = h('x-cryptopanic-key'); return k ? sourceCryptoPanic(k) : null; }],
+  ['newsCp',    (h, cfg) => { const k = h('x-cryptopanic-key'); return k ? sourceCryptoPanic(k, cfg) : null; }],
   // NUPL: rate limit brutal (8 req/jam) → hanya fetch kalau browser minta
-  // eksplisit (cache localStorage-nya stale > 24 jam)
-  ['nupl',      (h) => h('x-fetch-nupl') === '1' ? sourceNupl(h('x-btcdata-key') || '') : null],
+  // eksplisit (cache localStorage-nya stale > 24 jam). BTC only.
+  ['nupl',      (h) => h('x-fetch-nupl') === '1' ? sourceNupl(h('x-btcdata-key') || '') : null, 'hasNupl'],
 ];
 
 export default async function handler(request) {
@@ -1896,16 +1945,27 @@ export default async function handler(request) {
     try { return request?.headers?.get?.(name) || ''; } catch (_) { return ''; }
   };
 
-  // Jalankan semua source (no-key + keyed) paralel
-  const sourcePromises = SOURCES.map(([, fn]) => fn());
-  const keyedPromises = KEYED_SOURCES.map(([, fn]) => {
-    const p = fn(getHeader);
+  // v9: coin aktif dari ?symbol= (default BTC)
+  let cfg = COINS.BTC;
+  try {
+    const sym = (new URL(request.url).searchParams.get('symbol') || 'BTC').toUpperCase();
+    if (COINS[sym]) cfg = COINS[sym];
+  } catch (_) {}
+
+  // Jalankan semua source (no-key + keyed) paralel; skip yang tidak berlaku
+  // untuk coin ini (feature flag di COINS)
+  const skipped = (flag) => flag && cfg[flag] === false;
+  const sourcePromises = SOURCES.map(([, fn, , flag]) =>
+    skipped(flag) ? Promise.resolve(null) : fn(cfg));
+  const keyedPromises = KEYED_SOURCES.map(([, fn, flag]) => {
+    if (skipped(flag)) return Promise.resolve(null);
+    const p = fn(getHeader, cfg);
     return p == null ? Promise.resolve(null) : p;
   });
 
   const results = await Promise.allSettled([...sourcePromises, ...keyedPromises]);
 
-  const snapshot = { ts: Date.now(), version: 8 };
+  const snapshot = { ts: Date.now(), version: 9, symbol: cfg.symbol, coinName: cfg.name };
   const errors = [];      // sumber KRITIS yang gagal (perlu perhatian)
   const degraded = [];    // sumber OPSIONAL yang gagal (tidak masalah)
 
@@ -2068,6 +2128,7 @@ export default async function handler(request) {
         cycleHigh:   computed.cycleHigh,
         athAbsolute: snapshot.coingecko?.ath,      // ATH absolut (kalau CoinGecko ok)
         btcDominance: snapshot.global?.btcDominance,
+        coinDominance: snapshot.global?.coinDominance,   // v9: dominance coin aktif
         source: snapshot.coingecko ? 'computed+coingecko' : 'computed',
       };
     }
@@ -2088,17 +2149,21 @@ export default async function handler(request) {
   // ─── v8: Source health — supaya endpoint mati KETAHUAN, tidak senyap ──────
   // (pelajaran dari kasus ETF DefiLlama yang dead-code berbulan-bulan)
   const KEY_HEADER = { coinalyze: 'x-coinalyze-key', etfFlows: 'x-soso-key', fred: 'x-fred-key', newsCp: 'x-cryptopanic-key', nupl: 'x-fetch-nupl' };
+  // coinbaseTicker/kimchiRaw sudah diubah jadi field premium → cek field turunannya
+  const DERIVED_FIELD = { coinbaseTicker: 'coinbasePremium', kimchiRaw: 'kimchiPremium' };
   snapshot.sourceHealth = [
-    ...SOURCES.map(([label, , optional]) => ({
+    ...SOURCES.map(([label, , optional, flag]) => ({
       source: label,
-      ok: snapshot[label] != null,
+      ok: snapshot[DERIVED_FIELD[label] || label] != null,
       optional,
+      ...(skipped(flag) ? { notApplicable: true } : {}),
     })),
-    ...KEYED_SOURCES.map(([label]) => ({
+    ...KEYED_SOURCES.map(([label, , flag]) => ({
       source: label === 'newsCp' ? 'cryptopanic' : label,
       ok: (label === 'newsCp' ? snapshot.newsSource === 'cryptopanic' : snapshot[label] != null),
       optional: true,
       needsKey: !getHeader(KEY_HEADER[label]),
+      ...(skipped(flag) ? { notApplicable: true } : {}),
     })),
   ];
 
